@@ -1,181 +1,262 @@
 /**
- * CAD plugin worker — sub-goal 3 (PLA-55): cad:run_script + cad:export tool API surface.
+ * CAD plugin worker — sub-goals 3 (PLA-55) + 5 (PLA-56)
  *
- * Tools registered (v0.1.0 surface, operator-confirmed via approval f420bc31):
- *   cad:run_script  — execute a CadQuery Python script; return { artifactId, summary }
- *   cad:export      — export a staged artifact to step|stl|3mf; return { filePath }
+ * Tool surface (operator-confirmed via approval f420bc31):
+ *   cad:run_script  — execute CadQuery Python → staged artifact
+ *   cad:export      — staged artifact → GitHub commit + permalink
  *
- * Cross-cutting requirements (PLA-55 ACs):
- *   AC2  JSON-schema input validation → structured error, no stack traces
- *   AC3  ctx.metrics: tool.calls counter, tool.errors counter, tool.duration_ms histogram
- *   AC4  ctx.logger.info correlation log: correlationId, tool, agentId, status, durationMs.
- *        Payload contents NOT logged — only digests/lengths.
- *   AC5  Error taxonomy: validation_error, worker_timeout, worker_internal, auth.
- *        No silent swallowing.
- *   AC6  Stub worker wired via one-line integration switch (see comment below).
- *   AC7  cad:hello removed in manifest.ts.
+ * PLA-55 framework (AC2–AC6):
+ *   - Input validation: structured validation_error (400) with no stack traces.
+ *   - Metrics: ctx.metrics.write for tool.calls, tool.errors, tool.duration_ms.
+ *   - Correlation log: "tool call complete" with correlationId/tool/agentId/status/durationMs.
+ *   - No payload content in any log call.
  *
- * INTEGRATION SWITCH (sub-goal 2 handoff) — change this one import line when real worker lands:
+ * PLA-56 security rules:
+ *   - PAT resolved via ctx.secrets.resolve(config.githubPatSecretId) per call.
+ *   - PAT never logged, stored, returned, or tagged in metrics.
+ *   - PAT goes out of scope at function return.
+ *
+ * Push error taxonomy (PLA-56 AC4):
+ *   "auth"                 — 401/403: rotate PAT, no retry.
+ *   "network"              — 5xx / network error: transient, surface to agent.
+ *   "conflict"             — 409/422: re-fetch SHA and retry once (inline).
+ *   "prerequisite_missing" — repo 404/403: operator must pre-create repo.
  */
-// --- INTEGRATION SWITCH (sub-goal 2) — change this one line: ---
-import {
-  createCadWorker,
-  CadWorkerTimeoutError,
-  CadWorkerInternalError,
-} from "./stub-cad-worker.js";
-// When sub-goal 2 (real CadQuery worker client) is ready, replace with:
-//   import { createCadWorker, CadWorkerTimeoutError, CadWorkerInternalError } from "./cad-worker-client.js";
-// ---------------------------------------------------------------
 
 import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
-import type { PluginContext, ToolRunContext, ToolResult } from "@paperclipai/plugin-sdk";
-import { createHash } from "node:crypto";
+import type { PluginContext } from "@paperclipai/plugin-sdk";
+
+// INTEGRATION SWITCH (sub-goal 2 / PLA-54): real CadQuery sandbox client.
+import {
+  renderCadQuery,
+  DEFAULT_TIMEOUT_SECONDS as WORKER_DEFAULT_TIMEOUT,
+} from "./cad-worker-client.js";
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Config shape
 // ---------------------------------------------------------------------------
 
-/** Digest a string for safe logging — never log raw payload content (AC4). */
-function shortDigest(s: string): string {
-  return `sha256:${createHash("sha256").update(s).digest("hex").slice(0, 16)}`;
+interface CadPluginConfig {
+  githubPatSecretId: string;
+  artifactRepoUrl?: string;
+  artifactRepoBranch?: string;
 }
 
-/** Error taxonomy codes (AC5). */
-type ErrorCode = "validation_error" | "worker_timeout" | "worker_internal" | "auth";
+const DEFAULT_ARTIFACT_REPO_URL =
+  "https://github.com/claudegoogl-sudo/cad-artifacts.git";
+const DEFAULT_ARTIFACT_BRANCH = "main";
 
-function errorStatusCode(code: ErrorCode): number {
-  switch (code) {
-    case "validation_error": return 400;
-    case "auth":             return 403;
-    case "worker_internal":  return 500;
-    case "worker_timeout":   return 504;
+// ---------------------------------------------------------------------------
+// Artifact staging map (cad:run_script → cad:export handoff)
+// ---------------------------------------------------------------------------
+
+interface StagingEntry {
+  script: string;
+  stepPath: string;
+}
+
+const artifactStagingMap = new Map<string, StagingEntry>();
+
+// ---------------------------------------------------------------------------
+// Typed push errors (PLA-56)
+// ---------------------------------------------------------------------------
+
+type PushErrorKind = "auth" | "network" | "conflict" | "prerequisite_missing";
+
+class PushError extends Error {
+  readonly kind: PushErrorKind;
+  readonly httpStatus?: number;
+  constructor(kind: PushErrorKind, message: string, httpStatus?: number) {
+    super(message);
+    this.name = "PushError";
+    this.kind = kind;
+    this.httpStatus = httpStatus;
   }
 }
 
-/**
- * Build a structured error ToolResult (AC2/AC5).
- * No stack traces in the message. statusCode in data for host HTTP mapping.
- */
-function makeError(code: ErrorCode, message: string): ToolResult {
-  return {
-    error: `${code}: ${message}`,
-    data: { code, message, statusCode: errorStatusCode(code) },
-  };
+// ---------------------------------------------------------------------------
+// PLA-55 structured error helpers
+// ---------------------------------------------------------------------------
+
+function validationError(message: string) {
+  return { error: "validation_error", data: { code: "validation_error", statusCode: 400, message } };
+}
+
+function workerInternalError(message: string) {
+  return { data: { code: "worker_internal", statusCode: 500, message } };
 }
 
 // ---------------------------------------------------------------------------
-// Observability wrapper — emits metrics + correlation log for every call (AC3/AC4)
+// PLA-55 metrics + correlation-log helpers
 // ---------------------------------------------------------------------------
 
-async function withObservability(
-  ctx: PluginContext,
-  runCtx: ToolRunContext,
-  toolName: string,
-  fn: () => Promise<ToolResult>,
-): Promise<ToolResult> {
-  const start = Date.now();
-  const correlationId = runCtx.runId;
-  let status = "ok";
-  let result: ToolResult;
+interface RunCtx {
+  agentId?: string;
+  runId?: string;
+}
 
-  await ctx.metrics.write("tool.calls", 1, { tool: toolName });
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyCtx = PluginContext & { metrics?: { write: (name: string, value: number, tags?: Record<string, string>) => Promise<void> } };
 
-  try {
-    result = await fn();
-    if (result.error) {
-      const data = result.data as { code?: string } | undefined;
-      status = data?.code ?? "error";
-    }
-  } catch (err) {
-    // AC5: no silent swallowing
-    const message = err instanceof Error ? err.message : "Unexpected error in tool handler";
-    result = makeError("worker_internal", message);
-    status = "worker_internal";
-  }
+async function emitMetrics(ctx: AnyCtx, tool: string, durationMs: number, isError: boolean) {
+  await ctx.metrics?.write("tool.calls", 1, { tool });
+  await ctx.metrics?.write("tool.duration_ms", durationMs, { tool });
+  if (isError) await ctx.metrics?.write("tool.errors", 1, { tool });
+}
 
-  const durationMs = Date.now() - start;
-
-  if (status !== "ok") {
-    await ctx.metrics.write("tool.errors", 1, { tool: toolName });
-  }
-  await ctx.metrics.write("tool.duration_ms", durationMs, { tool: toolName });
-
-  // AC4: correlation log — no payload content
+function logCompletion(ctx: PluginContext, tool: string, runCtx: RunCtx, durationMs: number, status: "ok" | "error") {
   ctx.logger.info("tool call complete", {
-    correlationId,
-    tool: toolName,
+    correlationId: runCtx.runId,
+    tool,
     agentId: runCtx.agentId,
     status,
     durationMs,
   });
-
-  return result;
 }
 
 // ---------------------------------------------------------------------------
-// Input validators (AC2: structured error, no stack traces)
+// GitHub API helpers (PLA-56)
 // ---------------------------------------------------------------------------
 
-type ValidationResult<T> = { ok: true; params: T } | { ok: false; message: string };
-
-function validateRunScript(
-  raw: unknown,
-): ValidationResult<{ script: string; timeout?: number }> {
-  if (typeof raw !== "object" || raw === null) {
-    return { ok: false, message: "params must be an object" };
-  }
-  const p = raw as Record<string, unknown>;
-  if (typeof p.script !== "string" || p.script.length === 0) {
-    return { ok: false, message: "'script' is required and must be a non-empty string" };
-  }
-  if (p.timeout !== undefined) {
-    const t = Number(p.timeout);
-    if (!Number.isInteger(t) || t < 1 || t > 300) {
-      return { ok: false, message: "'timeout' must be an integer between 1 and 300" };
-    }
-  }
-  return { ok: true, params: { script: p.script as string, timeout: p.timeout as number | undefined } };
-}
-
-function validateExport(
-  raw: unknown,
-): ValidationResult<{ artifactId: string; format: "step" | "stl" | "3mf" }> {
-  if (typeof raw !== "object" || raw === null) {
-    return { ok: false, message: "params must be an object" };
-  }
-  const p = raw as Record<string, unknown>;
-  if (typeof p.artifactId !== "string" || p.artifactId.length === 0) {
-    return { ok: false, message: "'artifactId' is required and must be a non-empty string" };
-  }
-  const validFormats = ["step", "stl", "3mf"];
-  if (!validFormats.includes(p.format as string)) {
-    return { ok: false, message: `'format' must be one of: ${validFormats.join(", ")}` };
-  }
+function githubHeaders(pat: string): Record<string, string> {
   return {
-    ok: true,
-    params: {
-      artifactId: p.artifactId as string,
-      format: p.format as "step" | "stl" | "3mf",
-    },
+    Authorization: `Bearer ${pat}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "Content-Type": "application/json",
+    "User-Agent": "paperclip-plugin-cad/0.1.0",
   };
+}
+
+function parseGitHubUrl(repoUrl: string): [string, string] {
+  const match = repoUrl.match(/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/);
+  if (!match) throw new PushError("prerequisite_missing", `Cannot parse GitHub URL: ${repoUrl}`);
+  return [match[1], match[2]];
+}
+
+async function checkRepoPrerequisite(pat: string, repoUrl: string): Promise<void> {
+  const [owner, repo] = parseGitHubUrl(repoUrl);
+  const headers = githubHeaders(pat);
+  let resp: Response;
+  try {
+    resp = await fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers });
+  } catch (err) {
+    throw new PushError("network", `Network error reaching ${owner}/${repo}: ${(err as Error).message}`);
+  }
+  if (resp.status === 404) {
+    throw new PushError("prerequisite_missing",
+      `Artifact repo not found (404): ${owner}/${repo}. Operator must pre-create the repo and grant PAT access. See PLA-56 AC#1.`, 404);
+  }
+  if (resp.status === 401 || resp.status === 403) {
+    throw new PushError("prerequisite_missing",
+      `Artifact repo not accessible (${resp.status}): ${owner}/${repo}. Verify PAT has repo scope. See PLA-56 AC#1.`, resp.status);
+  }
+  if (!resp.ok) {
+    throw new PushError("network", `Unexpected ${resp.status} checking ${owner}/${repo}. Retry later.`, resp.status);
+  }
+}
+
+interface PushResult {
+  commitSha: string;
+  permalink: string;
+}
+
+async function checkArtifactExists(pat: string, repoUrl: string, repoPath: string): Promise<PushResult | null> {
+  let owner: string, repo: string;
+  try { [owner, repo] = parseGitHubUrl(repoUrl); } catch { return null; }
+  const headers = githubHeaders(pat);
+  let contentsResp: Response;
+  try {
+    contentsResp = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${repoPath}`, { headers });
+  } catch { return null; }
+  if (!contentsResp.ok) return null;
+  const contentsData = (await contentsResp.json()) as { sha?: string; html_url?: string };
+  try {
+    const commitResp = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/commits?path=${encodeURIComponent(repoPath)}&per_page=1`,
+      { headers });
+    if (commitResp.ok) {
+      const commits = (await commitResp.json()) as Array<{ sha?: string }>;
+      const sha = commits[0]?.sha;
+      if (sha) return { commitSha: sha, permalink: `https://github.com/${owner}/${repo}/blob/${sha}/${repoPath}` };
+    }
+  } catch { /* fall through */ }
+  return {
+    commitSha: contentsData.sha ?? "unknown",
+    permalink: contentsData.html_url ?? `https://github.com/${owner}/${repo}/blob/main/${repoPath}`,
+  };
+}
+
+async function pushArtifactToGitHub(
+  pat: string, repoUrl: string, branch: string,
+  localFile: string, repoPath: string, message: string,
+): Promise<PushResult> {
+  const [owner, repo] = parseGitHubUrl(repoUrl);
+  const { readFile } = await import("node:fs/promises");
+  const contentBase64 = (await readFile(localFile)).toString("base64");
+  const apiBase = `https://api.github.com/repos/${owner}/${repo}/contents/${repoPath}`;
+  const headers = githubHeaders(pat);
+
+  let existingSha: string | undefined;
+  let getResp: Response;
+  try { getResp = await fetch(apiBase, { headers }); }
+  catch (err) { throw new PushError("network", `Network error fetching ${repoPath}: ${(err as Error).message}`); }
+  if (getResp.ok) {
+    existingSha = ((await getResp.json()) as { sha?: string }).sha;
+  } else if (getResp.status === 401 || getResp.status === 403) {
+    throw new PushError("auth", `Auth failed (${getResp.status}) reading ${repoPath}. Rotate PAT.`, getResp.status);
+  } else if (getResp.status >= 500) {
+    throw new PushError("network", `API ${getResp.status} reading ${repoPath}. Retry.`, getResp.status);
+  }
+
+  const body: Record<string, unknown> = { message, content: contentBase64, branch };
+  if (existingSha) body.sha = existingSha;
+
+  let putResp: Response;
+  try { putResp = await fetch(apiBase, { method: "PUT", headers, body: JSON.stringify(body) }); }
+  catch (err) { throw new PushError("network", `Network error pushing ${repoPath}: ${(err as Error).message}`); }
+
+  if (!putResp.ok) {
+    const s = putResp.status;
+    if (s === 401 || s === 403) throw new PushError("auth", `Push auth failed (${s}). Rotate PAT.`, s);
+    if (s === 409 || s === 422) throw new PushError("conflict", `Conflict (${s}) on ${repoPath}.`, s);
+    if (s >= 500) throw new PushError("network", `API ${s} pushing ${repoPath}. Retry.`, s);
+    throw new PushError("network", `API error ${s}: ${await putResp.text()}`, s);
+  }
+
+  const result = (await putResp.json()) as { commit?: { sha?: string } };
+  const commitSha = result.commit?.sha ?? "";
+  return { commitSha, permalink: `https://github.com/${owner}/${repo}/blob/${commitSha}/${repoPath}` };
+}
+
+// ---------------------------------------------------------------------------
+// CadQuery render helpers
+// ---------------------------------------------------------------------------
+
+async function renderCadScript(script: string, timeoutSeconds = WORKER_DEFAULT_TIMEOUT): Promise<string> {
+  const result = await renderCadQuery(script, "step", timeoutSeconds);
+  if (!result.ok) throw new Error(`[${result.error}] ${result.message}`);
+  return result.artifactPath;
+}
+
+async function exportToFormat(entry: StagingEntry, format: "step" | "stl" | "3mf"): Promise<string> {
+  if (format === "step") return entry.stepPath;
+  const result = await renderCadQuery(entry.script, format, WORKER_DEFAULT_TIMEOUT);
+  if (!result.ok) throw new Error(`[${result.error}] Export to ${format} failed: ${result.message}`);
+  return result.artifactPath;
 }
 
 // ---------------------------------------------------------------------------
 // Plugin definition
 // ---------------------------------------------------------------------------
 
-const DEFAULT_TIMEOUT_S = 30;
-
 const plugin = definePlugin({
   async setup(ctx: PluginContext) {
-    ctx.logger.info("CAD plugin worker starting (v0.1.0 — cad:run_script + cad:export)");
-
-    // INTEGRATION SWITCH: createCadWorker() is the only call that changes
-    // when sub-goal 2 (real worker) lands. Everything below is worker-agnostic.
-    const cadWorker = createCadWorker();
+    ctx.logger.info("CAD plugin worker starting");
+    const anyCtx = ctx as AnyCtx;
 
     // ------------------------------------------------------------------
-    // cad:run_script — execute a CadQuery Python script (AC1)
+    // cad:run_script
     // ------------------------------------------------------------------
     ctx.tools.register(
       "cad:run_script",
@@ -185,101 +266,256 @@ const plugin = definePlugin({
         parametersSchema: {
           type: "object",
           properties: {
-            script: { type: "string" },
-            timeout: { type: "integer", minimum: 1, maximum: 300 },
+            script: { type: "string", description: "CadQuery Python script." },
+            timeout: { type: "integer", minimum: 1, maximum: 300, description: "Timeout (seconds, default 30)." },
           },
           required: ["script"],
           additionalProperties: false,
         },
       },
-      async (rawParams: unknown, runCtx: ToolRunContext): Promise<ToolResult> => {
-        return withObservability(ctx, runCtx, "cad:run_script", async () => {
-          const validation = validateRunScript(rawParams);
-          if (!validation.ok) {
-            return makeError("validation_error", validation.message);
-          }
-          const { script, timeout = DEFAULT_TIMEOUT_S } = validation.params;
+      async (params, runCtxRaw?: unknown) => {
+        const runCtx = (runCtxRaw as RunCtx | undefined) ?? {};
+        const tool = "cad:run_script";
+        const t0 = Date.now();
 
-          // AC4: log digest/length, not content
-          ctx.logger.info("cad:run_script dispatching to worker", {
-            correlationId: runCtx.runId,
-            agentId: runCtx.agentId,
-            scriptDigest: shortDigest(script),
-            scriptLen: script.length,
-            timeoutSeconds: timeout,
-          });
-
-          try {
-            const workerResult = await cadWorker.runScript(script, timeout);
-            return {
-              content: `Artifact created: ${workerResult.artifactId}\n${workerResult.summary}`,
-              data: { artifactId: workerResult.artifactId, summary: workerResult.summary },
-            };
-          } catch (err) {
-            if (err instanceof CadWorkerTimeoutError) return makeError("worker_timeout", err.message);
-            if (err instanceof CadWorkerInternalError) return makeError("worker_internal", err.message);
-            return makeError("worker_internal", err instanceof Error ? err.message : "Unknown worker error");
+        if (typeof params !== "object" || params === null) {
+          const ms = Date.now() - t0;
+          await emitMetrics(anyCtx, tool, ms, true);
+          logCompletion(ctx, tool, runCtx, ms, "error");
+          return validationError("params must be an object");
+        }
+        const p = params as Record<string, unknown>;
+        if (typeof p.script !== "string" || p.script.length === 0) {
+          const ms = Date.now() - t0;
+          await emitMetrics(anyCtx, tool, ms, true);
+          logCompletion(ctx, tool, runCtx, ms, "error");
+          return validationError("script is required and must be a non-empty string");
+        }
+        if (p.timeout !== undefined) {
+          const t = p.timeout;
+          if (typeof t !== "number" || !Number.isInteger(t) || t < 1 || t > 300) {
+            const ms = Date.now() - t0;
+            await emitMetrics(anyCtx, tool, ms, true);
+            logCompletion(ctx, tool, runCtx, ms, "error");
+            return validationError("timeout must be an integer between 1 and 300");
           }
-        });
+        }
+
+        const script = p.script as string;
+        const timeoutSeconds = typeof p.timeout === "number" ? p.timeout : WORKER_DEFAULT_TIMEOUT;
+
+        ctx.logger.info("cad:run_script: rendering", { scriptLength: script.length, timeoutSeconds });
+
+        let stepPath: string;
+        try {
+          stepPath = await renderCadScript(script, timeoutSeconds);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Unknown worker error";
+          ctx.logger.warn("cad:run_script: worker error", { error: msg });
+          const ms = Date.now() - t0;
+          await emitMetrics(anyCtx, tool, ms, true);
+          logCompletion(ctx, tool, runCtx, ms, "error");
+          return workerInternalError(msg);
+        }
+
+        const artifactId = `cad-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        artifactStagingMap.set(artifactId, { script, stepPath });
+        ctx.logger.info("cad:run_script: staged", { artifactId });
+
+        const ms = Date.now() - t0;
+        await emitMetrics(anyCtx, tool, ms, false);
+        logCompletion(ctx, tool, runCtx, ms, "ok");
+
+        return {
+          content: `Artifact staged: ${artifactId}`,
+          data: { artifactId, summary: `CadQuery script executed successfully (${script.length} chars)` },
+        };
       },
     );
 
     // ------------------------------------------------------------------
-    // cad:export — export a staged artifact to a file (AC1)
+    // cad:export  (PLA-55 tool surface + PLA-56 GitHub commit pipeline)
     // ------------------------------------------------------------------
     ctx.tools.register(
       "cad:export",
       {
         displayName: "CAD Export",
         description:
-          "Export a staged artifact to step|stl|3mf. " +
-          "Returns { filePath } within the plugin artifact-staging area.",
+          "Export a staged CAD artifact to the configured GitHub artifact repo. " +
+          "Returns { commitSha, permalink, artifactPath }. Idempotent per toolCallId.",
         parametersSchema: {
           type: "object",
           properties: {
-            artifactId: { type: "string" },
-            format: { type: "string", enum: ["step", "stl", "3mf"] },
+            artifactId: { type: "string", description: "Artifact ID from cad:run_script." },
+            format: { type: "string", enum: ["step", "stl", "3mf"], description: "Output format." },
+            paperclipTicketId: { type: "string", description: "Paperclip ticket ID for path/commit message." },
+            toolCallId: { type: "string", description: "Tool-call ID for deterministic path and idempotency." },
+            filename: { type: "string", description: "Optional filename override. Default: artifact.<format>." },
           },
-          required: ["artifactId", "format"],
-          additionalProperties: false,
+          required: ["artifactId", "format", "paperclipTicketId", "toolCallId"],
         },
       },
-      async (rawParams: unknown, runCtx: ToolRunContext): Promise<ToolResult> => {
-        return withObservability(ctx, runCtx, "cad:export", async () => {
-          const validation = validateExport(rawParams);
-          if (!validation.ok) {
-            return makeError("validation_error", validation.message);
-          }
-          const { artifactId, format } = validation.params;
+      async (params, runCtxRaw?: unknown) => {
+        const runCtx = (runCtxRaw as RunCtx | undefined) ?? {};
+        const tool = "cad:export";
+        const t0 = Date.now();
 
-          // AC4: artifactId is an opaque ID, safe to log
-          ctx.logger.info("cad:export dispatching to worker", {
-            correlationId: runCtx.runId,
-            agentId: runCtx.agentId,
-            artifactId,
-            format,
-          });
+        if (typeof params !== "object" || params === null) {
+          const ms = Date.now() - t0;
+          await emitMetrics(anyCtx, tool, ms, true);
+          logCompletion(ctx, tool, runCtx, ms, "error");
+          return validationError("params must be an object");
+        }
+        const p = params as Record<string, unknown>;
+        if (typeof p.artifactId !== "string" || p.artifactId.length === 0) {
+          const ms = Date.now() - t0;
+          await emitMetrics(anyCtx, tool, ms, true);
+          logCompletion(ctx, tool, runCtx, ms, "error");
+          return validationError("artifactId is required and must be a non-empty string");
+        }
+        const validFormats = ["step", "stl", "3mf"];
+        if (typeof p.format !== "string" || !validFormats.includes(p.format)) {
+          const ms = Date.now() - t0;
+          await emitMetrics(anyCtx, tool, ms, true);
+          logCompletion(ctx, tool, runCtx, ms, "error");
+          return validationError(`format must be one of: ${validFormats.join(", ")}`);
+        }
 
+        const { artifactId, format, paperclipTicketId, toolCallId, filename } = p as {
+          artifactId: string;
+          format: "step" | "stl" | "3mf";
+          paperclipTicketId?: string;
+          toolCallId?: string;
+          filename?: string;
+        };
+
+        ctx.logger.info("cad:export: starting", { artifactId, format });
+
+        const stagingEntry = artifactStagingMap.get(artifactId);
+        if (!stagingEntry) {
+          ctx.logger.warn("cad:export: unknown artifactId", { artifactId });
+          const ms = Date.now() - t0;
+          await emitMetrics(anyCtx, tool, ms, true);
+          logCompletion(ctx, tool, runCtx, ms, "error");
+          return workerInternalError(`No staged artifact for artifactId: ${artifactId}. Call cad:run_script first.`);
+        }
+
+        // Local-file export path (no GitHub params — pre-PLA-56 compat / PLA-55 tests).
+        if (!paperclipTicketId || !toolCallId) {
           try {
-            const workerResult = await cadWorker.export(artifactId, format);
-            return {
-              content: `Exported ${artifactId} as ${format}: ${workerResult.filePath}`,
-              data: { filePath: workerResult.filePath, artifactId, format },
-            };
+            const filePath = await exportToFormat(stagingEntry, format);
+            const ms = Date.now() - t0;
+            await emitMetrics(anyCtx, tool, ms, false);
+            logCompletion(ctx, tool, runCtx, ms, "ok");
+            return { data: { filePath, artifactId, format } };
           } catch (err) {
-            if (err instanceof CadWorkerTimeoutError) return makeError("worker_timeout", err.message);
-            if (err instanceof CadWorkerInternalError) return makeError("worker_internal", err.message);
-            return makeError("worker_internal", err instanceof Error ? err.message : "Unknown worker error");
+            const msg = err instanceof Error ? err.message : "Export failed";
+            const ms = Date.now() - t0;
+            await emitMetrics(anyCtx, tool, ms, true);
+            logCompletion(ctx, tool, runCtx, ms, "error");
+            return workerInternalError(msg);
           }
-        });
+        }
+
+        // --- PLA-56 GitHub commit pipeline ---
+        const config = (await ctx.config.get()) as unknown as CadPluginConfig;
+        if (!config.githubPatSecretId) {
+          const ms = Date.now() - t0;
+          await emitMetrics(anyCtx, tool, ms, true);
+          logCompletion(ctx, tool, runCtx, ms, "error");
+          return { data: { error: "prerequisite_missing", message: "githubPatSecretId not configured." } };
+        }
+
+        const repoUrl = config.artifactRepoUrl ?? DEFAULT_ARTIFACT_REPO_URL;
+        const branch = config.artifactRepoBranch ?? DEFAULT_ARTIFACT_BRANCH;
+        const resolvedFilename = filename ?? `artifact.${format}`;
+        const repoPath = `artifacts/${paperclipTicketId}/${toolCallId}/${resolvedFilename}`;
+
+        ctx.logger.info("cad:export: resolving GitHub PAT");
+        const pat = await ctx.secrets.resolve(config.githubPatSecretId);
+
+        try {
+          await checkRepoPrerequisite(pat, repoUrl);
+        } catch (err) {
+          if (err instanceof PushError && err.kind === "prerequisite_missing") {
+            ctx.logger.warn("cad:export: prerequisite failed", { repoUrl, httpStatus: err.httpStatus });
+            const ms = Date.now() - t0;
+            await emitMetrics(anyCtx, tool, ms, true);
+            logCompletion(ctx, tool, runCtx, ms, "error");
+            return { data: { error: "prerequisite_missing", message: err.message } };
+          }
+          throw err;
+        }
+
+        ctx.logger.info("cad:export: idempotency check", { repoPath });
+        const existing = await checkArtifactExists(pat, repoUrl, repoPath);
+        if (existing) {
+          ctx.logger.info("cad:export: already exists", { repoPath, commitSha: existing.commitSha });
+          const ms = Date.now() - t0;
+          await emitMetrics(anyCtx, tool, ms, false);
+          logCompletion(ctx, tool, runCtx, ms, "ok");
+          return {
+            content: `Artifact already present at ${repoPath} (${existing.commitSha})`,
+            data: { commitSha: existing.commitSha, permalink: existing.permalink, artifactPath: repoPath },
+          };
+        }
+
+        let localFile: string;
+        try {
+          localFile = await exportToFormat(stagingEntry, format);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Export failed";
+          const ms = Date.now() - t0;
+          await emitMetrics(anyCtx, tool, ms, true);
+          logCompletion(ctx, tool, runCtx, ms, "error");
+          return workerInternalError(msg);
+        }
+
+        const commitMessage = `CAD artifact: ticket=${paperclipTicketId} tool=cad:export call=${toolCallId}`;
+        const doPush = (): Promise<PushResult> =>
+          pushArtifactToGitHub(pat, repoUrl, branch, localFile, repoPath, commitMessage);
+
+        ctx.logger.info("cad:export: pushing", { repoPath, branch });
+
+        try {
+          let pushResult: PushResult;
+          try {
+            pushResult = await doPush();
+          } catch (firstErr) {
+            if (firstErr instanceof PushError && firstErr.kind === "conflict") {
+              ctx.logger.warn("cad:export: conflict, retrying once", { repoPath });
+              pushResult = await doPush();
+            } else {
+              throw firstErr;
+            }
+          }
+
+          ctx.logger.info("cad:export: committed", { repoPath, commitSha: pushResult.commitSha });
+          const ms = Date.now() - t0;
+          await emitMetrics(anyCtx, tool, ms, false);
+          logCompletion(ctx, tool, runCtx, ms, "ok");
+          return {
+            content: `Artifact committed: ${pushResult.permalink}`,
+            data: { commitSha: pushResult.commitSha, permalink: pushResult.permalink, artifactPath: repoPath },
+          };
+        } catch (err) {
+          if (err instanceof PushError) {
+            ctx.logger.warn("cad:export: push failed", { kind: err.kind, httpStatus: err.httpStatus });
+            const ms = Date.now() - t0;
+            await emitMetrics(anyCtx, tool, ms, true);
+            logCompletion(ctx, tool, runCtx, ms, "error");
+            return { data: { error: err.kind, message: err.message } };
+          }
+          throw err;
+        }
       },
     );
 
-    ctx.logger.info("CAD plugin worker setup complete", { tools: ["cad:run_script", "cad:export"] });
+    ctx.logger.info("CAD plugin worker setup complete");
   },
 
   async onHealth() {
-    return { status: "ok", message: "CAD plugin worker is running (stub worker — PLA-55 sub-goal 3)" };
+    return { status: "ok", message: "CAD plugin worker is running" };
   },
 });
 

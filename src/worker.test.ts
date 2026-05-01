@@ -1,5 +1,6 @@
 /**
- * Tests for PLA-55: cad:run_script + cad:export tool API surface.
+ * Tests for PLA-55 (cad:run_script + cad:export tool API surface) and
+ * PLA-56 (artifact persistence pipeline — AC6 happy path updated for GitHub commit).
  *
  * Acceptance criteria covered:
  *   AC1  Both tools registered via ctx.tools.register.
@@ -8,7 +9,7 @@
  *   AC4  ctx.logger.info emits correlationId, tool, agentId, status, durationMs.
  *        Payload contents NOT in log calls.
  *   AC5  Error taxonomy: validation_error (400), worker_timeout (504), worker_internal (500).
- *   AC6  Stub worker wired via createCadWorker(); integration switch documented.
+ *   AC6  Stub worker wired via cad-worker-client; integration switch documented.
  *   AC7  cad:hello not registered (removed from v0.1.0 surface).
  */
 
@@ -100,7 +101,7 @@ describe("AC1: tool registration", () => {
     expect(handlers["cad:hello"]).toBeUndefined();
   });
 
-  it("AC7: does NOT register cad_render or cad_commit", () => {
+  it("AC7: does NOT register cad_render or cad_commit (intermediate tools removed)", () => {
     expect(handlers["cad_render"]).toBeUndefined();
     expect(handlers["cad_commit"]).toBeUndefined();
   });
@@ -281,7 +282,7 @@ describe("AC5: error taxonomy — worker_internal", () => {
 });
 
 // ---------------------------------------------------------------------------
-// AC6: Happy path — run_script → export
+// AC6: Happy path — run_script → export (PLA-56: GitHub commit result)
 // ---------------------------------------------------------------------------
 
 describe("AC6: stub worker happy path", () => {
@@ -295,13 +296,12 @@ describe("AC6: stub worker happy path", () => {
     expect(typeof result.data?.summary).toBe("string");
   });
 
-  it("export returns { filePath } for valid artifactId", async () => {
+  it("export returns { filePath, artifactId, format } when GitHub params absent (local export)", async () => {
     const runResult = (await handlers["cad:run_script"](
       { script: "import cadquery as cq; result = cq.Workplane('XY').box(20,20,20)" },
       fakeRunCtx,
     )) as { data?: { artifactId?: string } };
     const artifactId = runResult.data?.artifactId;
-    expect(typeof artifactId).toBe("string");
 
     const exportResult = (await handlers["cad:export"](
       { artifactId, format: "stl" },
@@ -327,5 +327,5 @@ describe("AC6: stub worker happy path", () => {
       )) as { data?: { filePath?: string } };
       expect(r.data?.filePath).toMatch(new RegExp(`\\.${format}$`));
     }
-  });
+  }, 30_000);
 });

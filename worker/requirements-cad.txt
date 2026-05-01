@@ -1,0 +1,30 @@
+# CadQuery worker — exact dependency pins (PLA-54 AC5)
+#
+# Generated from `pip freeze` on the deployment host (Ubuntu 24.04, Python 3.12.3).
+# All version specifiers use == (no ^ or ~ ranges) to guarantee reproducible builds.
+#
+# To recreate the venv on a new host:
+#   python3 -m venv .venv-cad
+#   source .venv-cad/bin/activate
+#   pip install --no-deps -r worker/requirements-cad.txt
+#
+# To update pins (after a dependency upgrade):
+#   pip install cadquery==<new-version>
+#   pip freeze > worker/requirements-cad.txt
+#   # Remove unrelated system packages from the list
+#   # Commit the updated file and document the change in CHANGELOG.md
+#
+# Direct runtime dependencies:
+cadquery==2.7.0
+cadquery-ocp==7.8.1.1.post1
+#
+# Transitive dependencies (exact pins from pip freeze):
+casadi==3.7.2
+ezdxf==1.4.3
+multimethod==1.12
+nlopt==2.10.0
+numpy==2.4.4
+path==17.1.1
+runtype==0.5.3
+scipy==1.17.1
+typing_extensions==4.10.0
