@@ -391,6 +391,142 @@ describe("PLA-76 — sandbox hardening", () => {
     }
   }, T);
 
+  // -------------------------------------------------------------------------
+  // PLA-75 R1 — os.system / os.exec* / os.fork RCE blocked via os proxy.
+  // Regression test: must FAIL against commit 1465f69 (os not restricted —
+  // os.system runs the shell, then the script falls through to the
+  // "did not assign result" branch which produces script_error WITHOUT the
+  // PermissionError text).  Must PASS after PLA-75 R1 fix.
+  // -------------------------------------------------------------------------
+  it("os.system('true') → script_error with PermissionError (PLA-75 R1: os shell escape blocked)", async () => {
+    const workdir = await freshWorkdir();
+    const script =
+      "import os\n" +
+      "os.system('true')\n" +
+      "result = None";
+
+    const result = await invokeWorker(
+      { script, format: "step", workdir },
+      DEFAULT_TIMEOUT_SECONDS,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("script_error");
+      // Discriminator vs 1465f69: pre-fix, os.system ran cleanly and the
+      // failure was the trailing `result = None` check, whose message is
+      // about "did not assign" — it does NOT contain "PermissionError" or
+      // "os.system".  Post-fix, the proxy raises before any side effect.
+      expect(result.message).toMatch(/PermissionError/);
+      expect(result.message).toMatch(/os\.system/);
+    }
+  }, T);
+
+  it("os.fork() → script_error with PermissionError (PLA-75 R1: os.fork blocked)", async () => {
+    const workdir = await freshWorkdir();
+    const script =
+      "import os\n" +
+      "os.fork()\n" +
+      "result = None";
+
+    const result = await invokeWorker(
+      { script, format: "step", workdir },
+      DEFAULT_TIMEOUT_SECONDS,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("script_error");
+      expect(result.message).toMatch(/PermissionError/);
+      expect(result.message).toMatch(/os\.fork/);
+    }
+  }, T);
+
+  it("os.path.* and os.getcwd still work for legitimate CadQuery scripts (PLA-75 R1: proxy delegation)", async () => {
+    // The proxy must transparently delegate safe attributes — verifies the
+    // R1 fix did not over-block CadQuery's required os surface.
+    const workdir = await freshWorkdir();
+    const script =
+      "import os\n" +
+      "import cadquery as cq\n" +
+      "_ = os.path.join('a', 'b')\n" +
+      "_ = os.path.dirname('/tmp/x')\n" +
+      "_ = os.getcwd()\n" +
+      "_ = os.sep\n" +
+      "result = cq.Workplane('XY').box(1,1,1)\n";
+
+    const result = await invokeWorker(
+      { script, format: "step", workdir },
+      DEFAULT_TIMEOUT_SECONDS,
+    );
+
+    expect(result.ok).toBe(true);
+  }, T);
+
+  // -------------------------------------------------------------------------
+  // PLA-75 R2 — sys.modules['ctypes'] direct dict-read bypass blocked.
+  // Regression test: must FAIL against commit 1465f69 (CadQuery is imported
+  // AFTER user-script exec in 1465f69, so sys.modules['ctypes'] only has the
+  // real ctypes if user code triggered the load via `import cadquery` —
+  // which this test does — at which point libc.system runs the shell and
+  // the export succeeds with ok:true).  Must PASS after PLA-75 R2 fix.
+  // -------------------------------------------------------------------------
+  it("sys.modules['ctypes'] direct read → script_error (PLA-75 R2: ctypes bypass blocked)", async () => {
+    const workdir = await freshWorkdir();
+    // The user script imports cadquery, which on 1465f69 triggers a
+    // transitive ctypes load and populates sys.modules['ctypes'] with the
+    // real module.  After the R2 fix, ctypes is pre-imported by the worker
+    // and then popped from sys.modules before exec(), so this dict read
+    // raises KeyError immediately.
+    const script =
+      "import cadquery as cq\n" +
+      "import sys\n" +
+      "ctypes_mod = sys.modules['ctypes']\n" +
+      "libc = ctypes_mod.CDLL('libc.so.6')\n" +
+      "libc.system(b'true')\n" +
+      "result = cq.Workplane('XY').box(1,1,1)\n";
+
+    const result = await invokeWorker(
+      { script, format: "step", workdir },
+      DEFAULT_TIMEOUT_SECONDS,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("script_error");
+      // Discriminator vs 1465f69: pre-fix the script returns ok:true (libc
+      // ran successfully and cq export succeeded).  Post-fix, the dict read
+      // raises KeyError: 'ctypes' before any libc call.
+      expect(result.message).toMatch(/KeyError.*ctypes/);
+    }
+  }, T);
+
+  it("import ctypes via real __import__ post-init → ImportError (PLA-75 R2: meta-path locked)", async () => {
+    // After R2 hardening, ctypes is also in _META_PATH_BLOCKED, so even if a
+    // user reaches the real __import__ (e.g. via `__builtins__` membership
+    // tricks not blocked by RR2) the meta-path finder catches the import.
+    const workdir = await freshWorkdir();
+    const script =
+      "import cadquery as cq\n" +
+      "import sys\n" +
+      "# Direct re-import attempt via the real __import__ — blocked by\n" +
+      "# _BlockingMetaPathFinder once ctypes is in _META_PATH_BLOCKED.\n" +
+      "real_import = sys.modules['builtins'].__import__\n" +
+      "real_import('ctypes')\n" +
+      "result = cq.Workplane('XY').box(1,1,1)\n";
+
+    const result = await invokeWorker(
+      { script, format: "step", workdir },
+      DEFAULT_TIMEOUT_SECONDS,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("script_error");
+      expect(result.message).toMatch(/ImportError|ctypes/);
+    }
+  }, T);
+
   it("allocating >2 GB → worker_oom or process terminated (MEDIUM-1: RLIMIT_AS)", async () => {
     const workdir = await freshWorkdir();
     // 3 GiB allocation should exceed the 2 GiB RLIMIT_AS ceiling.
