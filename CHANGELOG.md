@@ -10,22 +10,21 @@ Tracker: [PLA-32](/PLA/issues/PLA-32)
 
 | Tool | Description |
 |------|-------------|
-| `cad_render` | Execute a CadQuery Python script in an isolated subprocess; return the artifact path in the system temp directory. |
-| `cad_commit` | Commit a rendered artifact to the project GitHub repository via the GitHub Contents API; return the commit SHA. |
-| `cad:hello` | Stub tool for end-to-end dispatch verification; no side effects. |
+| `cad:run_script` | Execute a CadQuery Python script string in an isolated subprocess; return `{ artifactId, summary }`. The artifact is staged locally. |
+| `cad:export` | Export a previously staged artifact to a specific format (`step`, `stl`, `3mf`); return `{ filePath }` within the plugin artifact-staging area. |
 
 ### Capabilities declared
 
 | Capability | Why |
 |------------|-----|
-| `agent.tools.register` | Register `cad_render`, `cad_commit`, and `cad:hello` on enabled agents. |
-| `http.outbound` | Push artifacts to the GitHub Contents API. |
-| `secrets.read-ref` | Resolve the GitHub PAT from the Paperclip secrets store per call. |
-| `metrics.write` | Emit tool-call counters and latency metrics via `ctx.metrics.write`. |
+| `agent.tools.register` | Register `cad:run_script` and `cad:export` on enabled agents. |
+| `http.outbound` | Reserved for the real CadQuery worker (sub-goal 2 of [PLA-32](/PLA/issues/PLA-32)). |
+| `secrets.read-ref` | Reserved for future worker auth flows (sub-goal 2). |
+| `metrics.write` | Emit tool-call counters and duration histograms via `ctx.metrics`. |
 
 ### Known limitations
 
-- CadQuery subprocess sandbox (timeout, stdout/stderr capture, resource limits) is a placeholder in v0.1.0. Full implementation is tracked in sub-goal 2/5 of [PLA-32](/PLA/issues/PLA-32).
-- `cad_render` writes a stub file in v0.1.0; the real CadQuery execution engine is pending the same sub-goal.
-- Only the GitHub Contents API is supported for artifact storage. Other VCS hosts or object stores are out of scope for v0.1.0.
-- The target repository URL is currently hardcoded in the worker; a configurable `repoUrl` field is a planned extension.
+- CadQuery subprocess sandbox (timeout enforcement, stdout/stderr capture, resource limits) is a stub in v0.1.0. Full implementation is tracked in sub-goal 2/5 of [PLA-32](/PLA/issues/PLA-32).
+- `cad:run_script` accepts the `timeout` field but does not enforce it in the v0.1.0 stub.
+- `filePath` returned by `cad:export` is a local staging path, not a URL. The artifact-persistence pipeline (download/commit to GitHub) is wired in sub-goal 5.
+- Only three export formats are supported: `step`, `stl`, `3mf`.

@@ -8,16 +8,16 @@ Plugin: `platform.cad` · Version: `0.1.0` · Tracker: [PLA-32](/PLA/issues/PLA-
 
 ## Tools
 
-### `cad_render`
+### `cad:run_script`
 
-Execute a CadQuery Python script in an isolated subprocess and return the resulting 3D model artifact path.
+Execute a CadQuery Python script string in an isolated subprocess. Returns a staged artifact ID and a summary of the shape produced.
 
 #### Input schema
 
-| Field    | Type   | Required | Description |
-|----------|--------|----------|-------------|
-| `script` | string | yes      | CadQuery Python script. Must produce a final shape assigned to `result`. |
-| `format` | string | no       | Output format: `"step"` (default) or `"stl"`. |
+| Field     | Type    | Required | Description |
+|-----------|---------|----------|-------------|
+| `script`  | string  | yes      | CadQuery Python script to execute. Must define a CadQuery shape. |
+| `timeout` | integer | no       | Execution timeout in seconds (1–300, default: 30). Enforced by the CAD worker; the v0.1.0 stub accepts but ignores this field. |
 
 ```json
 {
@@ -25,15 +25,17 @@ Execute a CadQuery Python script in an isolated subprocess and return the result
   "properties": {
     "script": {
       "type": "string",
-      "description": "CadQuery Python script."
+      "description": "CadQuery Python script to execute. Must define a CadQuery shape."
     },
-    "format": {
-      "type": "string",
-      "enum": ["step", "stl"],
-      "description": "Output format. Defaults to 'step'."
+    "timeout": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 300,
+      "description": "Execution timeout in seconds (1–300, default: 30)."
     }
   },
-  "required": ["script"]
+  "required": ["script"],
+  "additionalProperties": false
 }
 ```
 
@@ -41,48 +43,47 @@ Execute a CadQuery Python script in an isolated subprocess and return the result
 
 ```json
 {
-  "artifactPath": "/tmp/cad-1714000000000.step",
-  "format": "step"
+  "artifactId": "cad-artifact-<uuid>",
+  "summary": "Box 10×10×10 mm"
 }
 ```
 
-| Field          | Type   | Description |
-|----------------|--------|-------------|
-| `artifactPath` | string | Absolute path to the rendered file in the system temp directory. Pass this to `cad_commit`. |
-| `format`       | string | The format that was used. |
+| Field        | Type   | Description |
+|--------------|--------|-------------|
+| `artifactId` | string | Opaque ID for the staged artifact. Pass this to `cad:export`. |
+| `summary`    | string | Human-readable description of the shape produced. |
 
 ---
 
-### `cad_commit`
+### `cad:export`
 
-Commit a previously rendered CAD artifact to the project GitHub repository and return the commit SHA.
+Export a previously staged CAD artifact to a specific file format. Returns the file path within the plugin artifact-staging area.
+
+> **Note:** `filePath` is a local staging path, not a URL. The artifact-persistence pipeline (sub-goal 5 of [PLA-32](/PLA/issues/PLA-32)) will wire download/commit flows.
 
 #### Input schema
 
-| Field           | Type   | Required | Description |
-|-----------------|--------|----------|-------------|
-| `artifactPath`  | string | yes      | Local artifact path returned by `cad_render`. Must be inside the system temp directory. |
-| `repoPath`      | string | yes      | Target path within the repository, e.g. `parts/bracket.step`. |
-| `commitMessage` | string | yes      | Git commit message. |
+| Field        | Type   | Required | Description |
+|--------------|--------|----------|-------------|
+| `artifactId` | string | yes      | Artifact ID returned by `cad:run_script`. |
+| `format`     | string | yes      | Output file format: `"step"`, `"stl"`, or `"3mf"`. |
 
 ```json
 {
   "type": "object",
   "properties": {
-    "artifactPath": {
+    "artifactId": {
       "type": "string",
-      "description": "Local artifact path from cad_render."
+      "description": "Artifact ID returned by cad:run_script."
     },
-    "repoPath": {
+    "format": {
       "type": "string",
-      "description": "Target path in the repository."
-    },
-    "commitMessage": {
-      "type": "string",
-      "description": "Git commit message."
+      "enum": ["step", "stl", "3mf"],
+      "description": "Output file format."
     }
   },
-  "required": ["artifactPath", "repoPath", "commitMessage"]
+  "required": ["artifactId", "format"],
+  "additionalProperties": false
 }
 ```
 
@@ -90,27 +91,13 @@ Commit a previously rendered CAD artifact to the project GitHub repository and r
 
 ```json
 {
-  "repoPath": "parts/bracket.step",
-  "commitSha": "abc123def456..."
+  "filePath": "/var/paperclip/artifacts/cad-artifact-<uuid>.step"
 }
 ```
 
-| Field       | Type   | Description |
-|-------------|--------|-------------|
-| `repoPath`  | string | The path the artifact was committed to. |
-| `commitSha` | string | GitHub commit SHA. |
-
----
-
-### `cad:hello` (test/stub only)
-
-Returns a canned OK response with no side effects. Used for end-to-end verification of the plugin tool dispatch path. Not intended for production agent workflows.
-
-#### Input schema
-
-| Field  | Type   | Required | Description |
-|--------|--------|----------|-------------|
-| `name` | string | no       | Optional greeting name. Defaults to `"world"`. |
+| Field      | Type   | Description |
+|------------|--------|-------------|
+| `filePath` | string | Absolute path to the exported file in the plugin artifact-staging area. |
 
 ---
 
@@ -118,34 +105,34 @@ Returns a canned OK response with no side effects. Used for end-to-end verificat
 
 | Error condition | Behaviour |
 |-----------------|-----------|
-| `artifactPath` outside temp directory | `cad_commit` returns `{ "error": "artifactPath must be within the temp directory." }` and does not push. |
-| `githubPatSecretId` missing from config | `cad_commit` returns `{ "error": "githubPatSecretId is not configured. Set it in plugin instance config." }` |
-| GitHub API non-2xx response | `cad_commit` throws; the tool call surfaces the error message from the GitHub API. |
-| CadQuery script error (v0.1.0) | `cad_render` propagates the subprocess exit error. The full render sandbox is tracked in sub-goal 5. |
+| `script` missing or empty | `cad:run_script` returns a validation error before execution. |
+| `timeout` out of range (< 1 or > 300) | Schema validation rejects the call. |
+| CadQuery script raises an exception | `cad:run_script` surfaces the Python traceback in the error message. |
+| Unknown `artifactId` passed to `cad:export` | `cad:export` returns an error indicating the artifact was not found. |
+| Unsupported `format` value | Schema validation rejects the call (enum constraint). |
 
 ---
 
 ## Worked example
 
-Design a simple mounting bracket and commit it:
+Design a simple bracket and export it as STEP:
 
 ```
-# Step 1 — render
-Tool call: cad_render
+# Step 1 — run the script
+Tool call: cad:run_script
 {
   "script": "import cadquery as cq\nresult = (cq.Workplane('XY')\n    .box(40, 20, 5)\n    .faces('>Z').workplane()\n    .hole(4))",
+  "timeout": 30
+}
+→ { "artifactId": "cad-artifact-a1b2c3d4", "summary": "Box 40×20×5 mm with Ø4 hole" }
+
+# Step 2 — export to STEP
+Tool call: cad:export
+{
+  "artifactId": "cad-artifact-a1b2c3d4",
   "format": "step"
 }
-→ { "artifactPath": "/tmp/cad-1714000000000.step", "format": "step" }
-
-# Step 2 — commit
-Tool call: cad_commit
-{
-  "artifactPath": "/tmp/cad-1714000000000.step",
-  "repoPath": "parts/mounting-bracket.step",
-  "commitMessage": "Add mounting bracket (40×20×5mm, Ø4 hole)"
-}
-→ { "repoPath": "parts/mounting-bracket.step", "commitSha": "abc123…" }
+→ { "filePath": "/var/paperclip/artifacts/cad-artifact-a1b2c3d4.step" }
 ```
 
 **CadQuery tutorial:** Out of scope for v0.1.0. See the [CadQuery documentation](https://cadquery.readthedocs.io/) for the scripting API.
