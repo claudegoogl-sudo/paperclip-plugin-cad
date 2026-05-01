@@ -207,6 +207,44 @@ var plugin = definePlugin({
   async setup(ctx) {
     ctx.logger.info("CAD plugin worker starting");
     ctx.tools.register(
+      "hello",
+      {
+        displayName: "CAD Hello",
+        description: "Stub tool \u2014 returns a canned OK response with no side effects.",
+        parametersSchema: {
+          type: "object",
+          properties: {
+            name: {
+              type: "string",
+              description: "Optional greeting name. Defaults to 'world'."
+            }
+          },
+          required: [],
+          additionalProperties: false
+        }
+      },
+      async (params, runCtx) => {
+        const correlationId = runCtx.runId;
+        const startMs = Date.now();
+        ctx.logger.info("cad:hello: entry", {
+          correlationId,
+          agentId: runCtx.agentId
+        });
+        const { name = "world" } = params ?? {};
+        const result = {
+          ok: true,
+          message: `Hello, ${name}! paperclip-plugin-cad v0.1.0 is ready.`
+        };
+        const latencyMs = Date.now() - startMs;
+        await ctx.metrics.write("tool.calls", 1, { tool: "cad:hello" });
+        await ctx.metrics.write("tool.latency_ms", latencyMs, {
+          tool: "cad:hello"
+        });
+        ctx.logger.info("cad:hello: exit", { correlationId, latencyMs });
+        return { content: result.message, data: result };
+      }
+    );
+    ctx.tools.register(
       "cad_render",
       {
         displayName: "CAD Render",

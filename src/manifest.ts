@@ -58,6 +58,26 @@ const manifest: PaperclipPluginManifestV1 = {
 
   tools: [
     {
+      // Stub tool — PLA-53: proves the PLA-39 agent-JWT dispatch path
+      // end-to-end before any real CAD code lands. No side effects.
+      name: "hello",
+      displayName: "CAD Hello",
+      description:
+        "Stub tool that returns a canned OK response with no side effects. " +
+        "Verifies the plugin tool dispatch path (PLA-53 AC4).",
+      parametersSchema: {
+        type: "object",
+        properties: {
+          name: {
+            type: "string",
+            description: "Optional greeting name. Defaults to 'world'.",
+          },
+        },
+        required: [],
+        additionalProperties: false,
+      },
+    },
+    {
       name: "cad_render",
       displayName: "CAD Render",
       description:

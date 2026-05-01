@@ -393,6 +393,59 @@ const plugin = definePlugin({
     ctx.logger.info("CAD plugin worker starting");
 
     // ------------------------------------------------------------------
+    // hello — stub tool for PLA-53 end-to-end dispatch verification
+    //
+    // No side effects. Proves the PLA-39 agent-JWT → plugin tool route
+    // works before any real CAD code lands.
+    // Tool name is "hello" (namespaced to "platform.cad:hello" for agents).
+    // ------------------------------------------------------------------
+    ctx.tools.register(
+      "hello",
+      {
+        displayName: "CAD Hello",
+        description:
+          "Stub tool — returns a canned OK response with no side effects.",
+        parametersSchema: {
+          type: "object",
+          properties: {
+            name: {
+              type: "string",
+              description: "Optional greeting name. Defaults to 'world'.",
+            },
+          },
+          required: [],
+          additionalProperties: false,
+        },
+      },
+      async (params, runCtx) => {
+        const correlationId = runCtx.runId;
+        const startMs = Date.now();
+
+        ctx.logger.info("cad:hello: entry", {
+          correlationId,
+          agentId: runCtx.agentId,
+        });
+
+        const { name = "world" } = (params ?? {}) as { name?: string };
+
+        const result = {
+          ok: true,
+          message: `Hello, ${name}! paperclip-plugin-cad v0.1.0 is ready.`,
+        };
+
+        const latencyMs = Date.now() - startMs;
+        await ctx.metrics.write("tool.calls", 1, { tool: "cad:hello" });
+        await ctx.metrics.write("tool.latency_ms", latencyMs, {
+          tool: "cad:hello",
+        });
+
+        ctx.logger.info("cad:hello: exit", { correlationId, latencyMs });
+
+        return { content: result.message, data: result };
+      },
+    );
+
+    // ------------------------------------------------------------------
     // cad_render — execute a CadQuery script, return artifact path
     // ------------------------------------------------------------------
     ctx.tools.register(
