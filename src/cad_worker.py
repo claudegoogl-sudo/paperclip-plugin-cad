@@ -129,18 +129,33 @@ _BLOCKED_MODULES_SET: frozenset[str] = frozenset(_BLOCKED_MODULES)
 # Subset that is safe to replace with stubs in sys.modules without breaking
 # Python or CadQuery internals.
 #
-# importlib / importlib.util / importlib.machinery are EXCLUDED from sys.modules
-# stubs because CadQuery's __init__.py does `from importlib.metadata import …`
-# lazily during user-script execution; stubbing importlib breaks that import.
-# _restricted_import and _BlockingMetaPathFinder still block user-script imports.
+# ctypes / ctypes.util are EXCLUDED: CadQuery loads OpenCASCADE C extensions via
+# ctypes.  Replacing sys.modules['ctypes'] before exec() would hand CadQuery a
+# stub instead of the real ctypes, breaking shape creation and export.
+# _restricted_import (exec-namespace only) still blocks user-script `import ctypes`.
 #
-# threading is EXCLUDED because Python's runtime needs sys.modules['threading']
-# for cleanup (__del__, atexit hooks).  User-script imports are still blocked by
-# _restricted_import.
+# importlib.* are EXCLUDED: CadQuery's __init__.py does
+# `from importlib.metadata import version` on first import, and transitively
+# pulls in importlib.abc / importlib.resources.  Stubbing any of these breaks the
+# import chain.  User-script imports are still blocked by _restricted_import.
+#
+# threading is EXCLUDED: Python's runtime needs sys.modules['threading'] for
+# __del__ / atexit cleanup.  User-script imports are blocked by _restricted_import.
 _SYS_MODULES_STUBS: list[str] = [
     m for m in _BLOCKED_MODULES
-    if not (m == "threading" or m.startswith("importlib"))
+    if not (m == "threading" or m.startswith(("ctypes", "importlib")))
 ]
+
+# Modules safe to intercept globally via sys.meta_path.
+# Meta-path hooks fire for ALL imports (including CadQuery internals), so we
+# must exclude anything that CadQuery or its transitive dependencies need:
+#   ctypes / ctypes.*  — OCC loads C extensions via ctypes
+#   importlib.*        — CadQuery uses importlib.metadata, .abc, .resources
+# User-script imports of these are still blocked by _restricted_import.
+_META_PATH_BLOCKED_SET: frozenset[str] = frozenset(
+    m for m in _BLOCKED_MODULES
+    if not m.startswith(("ctypes", "importlib"))
+)
 
 
 class _NetworkBlockedModule(ModuleType):
@@ -264,12 +279,12 @@ class _BlockingMetaPathFinder:
     """
 
     def find_spec(self, fullname: str, path: Any, target: Any = None) -> None:  # type: ignore[return]
-        # Use EXACT matching only (not root-prefix).  Root-prefix matching would
-        # also block importlib.metadata, importlib.resources, etc. which are
-        # legitimate stdlib modules needed by CadQuery internals.  The precise
-        # entries in _BLOCKED_MODULES_SET (importlib.util, importlib.machinery)
-        # are the dangerous ones; importlib.metadata is intentionally not listed.
-        if fullname in _BLOCKED_MODULES_SET:
+        # Uses _META_PATH_BLOCKED_SET (not the full _BLOCKED_MODULES_SET) because
+        # meta_path hooks fire for ALL imports in the process — including CadQuery
+        # internals that legitimately need ctypes / importlib.*.  Those are excluded
+        # from _META_PATH_BLOCKED_SET; _restricted_import (exec-namespace only)
+        # still blocks them for user scripts.
+        if fullname in _META_PATH_BLOCKED_SET:
             raise ImportError(
                 f"[cad-worker] Import blocked: '{fullname}' is not allowed "
                 f"inside the CadQuery sandbox."
