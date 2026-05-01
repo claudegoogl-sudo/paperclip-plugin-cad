@@ -1,23 +1,18 @@
 /**
- * Regression tests for PLA-50: artifactPath path-traversal guard in cad_commit.
+ * Tests for PLA-55: cad:run_script + cad:export tool API surface.
  *
  * Acceptance criteria covered:
- *   AC1  artifactPath is resolved and checked against os.tmpdir() + "/" prefix.
- *   AC2  Out-of-bounds paths return a structured error; no throw.
- *   AC3  pushArtifactToGitHub is never called with an out-of-bounds path.
- *   AC4  cad_commit("/etc/passwd") returns the error response.
- *   AC5  cad_commit(valid tmpdir path) proceeds (GitHub fetch is mocked).
+ *   AC1  Both tools registered via ctx.tools.register.
+ *   AC2  JSON-schema validation rejects malformed input; structured error, no stack trace.
+ *   AC3  ctx.metrics.write called for tool.calls, tool.errors, tool.duration_ms with tool tag.
+ *   AC4  ctx.logger.info emits correlationId, tool, agentId, status, durationMs.
+ *        Payload contents NOT in log calls.
+ *   AC5  Error taxonomy: validation_error (400), worker_timeout (504), worker_internal (500).
+ *   AC6  Stub worker wired via createCadWorker(); integration switch documented.
+ *   AC7  cad:hello not registered (removed from v0.1.0 surface).
  */
 
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { writeFile, unlink } from "node:fs/promises";
-import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
-
-// ---------------------------------------------------------------------------
-// Mock the plugin SDK so runWorker is a no-op and definePlugin is transparent.
-// This must be declared before the dynamic import of worker.ts.
-// ---------------------------------------------------------------------------
+import { describe, it, expect, vi, beforeAll } from "vitest";
 
 vi.mock("@paperclipai/plugin-sdk", () => ({
   definePlugin: (config: unknown) => config,
@@ -25,151 +20,312 @@ vi.mock("@paperclipai/plugin-sdk", () => ({
 }));
 
 // ---------------------------------------------------------------------------
-// Minimal ctx mock that captures registered tool handlers.
+// Mock ctx
 // ---------------------------------------------------------------------------
 
-type ToolHandler = (params: unknown) => Promise<unknown>;
+type ToolHandler = (params: unknown, runCtx: unknown) => Promise<unknown>;
 
-function buildMockCtx(pat = "ghp_fake_token", githubPatSecretId = "secret-uuid-123") {
+function buildMockCtx() {
   const handlers: Record<string, ToolHandler> = {};
+  const metricCalls: Array<{ name: string; value: number; tags?: Record<string, string> }> = [];
+  const logInfoCalls: Array<{ message: string; meta: Record<string, unknown> }> = [];
 
   const ctx = {
     logger: {
-      info: vi.fn(),
+      info: vi.fn((message: string, meta?: Record<string, unknown>) => {
+        logInfoCalls.push({ message, meta: meta ?? {} });
+      }),
       warn: vi.fn(),
       error: vi.fn(),
+      debug: vi.fn(),
+    },
+    metrics: {
+      write: vi.fn(async (name: string, value: number, tags?: Record<string, string>) => {
+        metricCalls.push({ name, value, tags });
+      }),
     },
     tools: {
-      register: vi.fn((_name: string, _meta: unknown, handler: ToolHandler) => {
+      register: vi.fn((_name: string, _decl: unknown, handler: ToolHandler) => {
         handlers[_name] = handler;
       }),
     },
-    config: {
-      get: vi.fn().mockResolvedValue({ githubPatSecretId }),
-    },
-    secrets: {
-      resolve: vi.fn().mockResolvedValue(pat),
-    },
   };
 
-  return { ctx, handlers };
+  return { ctx, handlers, metricCalls, logInfoCalls };
 }
 
+const fakeRunCtx = {
+  agentId: "agent-uuid-001",
+  runId: "run-uuid-001",
+  companyId: "company-uuid-001",
+  projectId: "project-uuid-001",
+};
+
 // ---------------------------------------------------------------------------
-// Set up the plugin once for the whole suite.
+// Load the plugin once per suite
 // ---------------------------------------------------------------------------
 
-let cadCommit: ToolHandler;
+let handlers: Record<string, ToolHandler>;
+let metricCalls: Array<{ name: string; value: number; tags?: Record<string, string> }>;
+let logInfoCalls: Array<{ message: string; meta: Record<string, unknown> }>;
 
 beforeAll(async () => {
-  const { ctx, handlers } = buildMockCtx();
+  const { ctx, handlers: h, metricCalls: m, logInfoCalls: l } = buildMockCtx();
+  handlers = h;
+  metricCalls = m;
+  logInfoCalls = l;
 
-  // Stub global fetch before importing so pushArtifactToGitHub uses the stub.
-  vi.stubGlobal("fetch", vi.fn());
-
-  // Import worker — runWorker is mocked so the module loads cleanly.
-  // definePlugin returns the config object directly, so plugin.setup === setup fn.
-  const plugin = (await import("./worker.js")) as {
+  const mod = (await import("./worker.js")) as {
     default?: { setup?: (ctx: unknown) => Promise<void> };
   };
-  const setup = plugin.default?.setup;
-  if (typeof setup !== "function") {
-    throw new Error("Could not find plugin setup function in worker module");
-  }
+  const setup = mod.default?.setup;
+  if (typeof setup !== "function") throw new Error("setup() not found in worker module");
   await setup(ctx);
-
-  cadCommit = handlers["cad_commit"];
-  if (typeof cadCommit !== "function") {
-    throw new Error("cad_commit handler not registered");
-  }
-});
-
-afterAll(() => {
-  vi.unstubAllGlobals();
-  vi.resetModules();
 });
 
 // ---------------------------------------------------------------------------
-// Tests
+// AC1: Both tools registered
 // ---------------------------------------------------------------------------
 
-describe("cad_commit — artifactPath path-traversal guard (PLA-50)", () => {
-  it("AC4: rejects /etc/passwd with a structured error and never calls fetch", async () => {
-    const fetchMock = vi.mocked(globalThis.fetch);
-    fetchMock.mockClear();
-
-    const result = (await cadCommit({
-      artifactPath: "/etc/passwd",
-      repoPath: "models/part.step",
-      commitMessage: "add part",
-    })) as { data?: { error?: string } };
-
-    expect(result.data?.error).toMatch(/temp directory/i);
-    // AC3: pushArtifactToGitHub (which uses fetch) must NOT have been called.
-    expect(fetchMock).not.toHaveBeenCalled();
+describe("AC1: tool registration", () => {
+  it("registers cad:run_script", () => {
+    expect(typeof handlers["cad:run_script"]).toBe("function");
   });
 
-  it("AC4 variant: rejects dot-dot traversal through tmpdir", async () => {
-    const fetchMock = vi.mocked(globalThis.fetch);
-    fetchMock.mockClear();
-
-    const result = (await cadCommit({
-      artifactPath: `${tmpdir()}/../../../etc/shadow`,
-      repoPath: "models/part.step",
-      commitMessage: "exfil",
-    })) as { data?: { error?: string } };
-
-    expect(result.data?.error).toMatch(/temp directory/i);
-    expect(fetchMock).not.toHaveBeenCalled();
+  it("registers cad:export", () => {
+    expect(typeof handlers["cad:export"]).toBe("function");
   });
 
-  it("AC4 variant: rejects relative path that escapes tmpdir", async () => {
-    const fetchMock = vi.mocked(globalThis.fetch);
-    fetchMock.mockClear();
-
-    const result = (await cadCommit({
-      artifactPath: "../../etc/hosts",
-      repoPath: "models/part.step",
-      commitMessage: "test",
-    })) as { data?: { error?: string } };
-
-    expect(result.data?.error).toMatch(/temp directory/i);
-    expect(fetchMock).not.toHaveBeenCalled();
+  it("AC7: does NOT register cad:hello", () => {
+    expect(handlers["cad:hello"]).toBeUndefined();
   });
 
-  it("AC5: accepts a valid tmpdir path and calls GitHub API", async () => {
-    const validPath = join(tmpdir(), "cad-test-pla50.step");
-    await writeFile(validPath, "; stub content");
+  it("AC7: does NOT register cad_render or cad_commit", () => {
+    expect(handlers["cad_render"]).toBeUndefined();
+    expect(handlers["cad_commit"]).toBeUndefined();
+  });
+});
 
-    const fetchMock = vi.mocked(globalThis.fetch);
-    fetchMock.mockReset();
-    // GET (file check) → 404 (new file).
-    fetchMock.mockResolvedValueOnce({
-      ok: false,
-      status: 404,
-      text: async () => "not found",
-      json: async () => ({}),
-    } as Response);
-    // PUT → success.
-    fetchMock.mockResolvedValueOnce({
-      ok: true,
-      status: 201,
-      text: async () => "",
-      json: async () => ({ commit: { sha: "abc123def456" } }),
-    } as Response);
+// ---------------------------------------------------------------------------
+// AC2 + AC5: Input validation — cad:run_script
+// ---------------------------------------------------------------------------
 
-    const result = (await cadCommit({
-      artifactPath: validPath,
-      repoPath: "models/part.step",
-      commitMessage: "add part",
-    })) as { data?: { commitSha?: string; error?: string } };
+describe("cad:run_script — input validation (AC2/AC5)", () => {
+  it("returns validation_error when script is missing", async () => {
+    const result = (await handlers["cad:run_script"]({}, fakeRunCtx)) as {
+      error?: string;
+      data?: { code?: string; statusCode?: number };
+    };
+    expect(result.error).toMatch(/validation_error/);
+    expect(result.data?.code).toBe("validation_error");
+    expect(result.data?.statusCode).toBe(400);
+  });
 
-    // No error — commit should have succeeded.
-    expect(result.data?.error).toBeUndefined();
-    expect(result.data?.commitSha).toBe("abc123def456");
-    // AC3 (positive): fetch was called because the path was valid.
-    expect(fetchMock).toHaveBeenCalled();
+  it("returns validation_error when script is empty string", async () => {
+    const result = (await handlers["cad:run_script"]({ script: "" }, fakeRunCtx)) as {
+      data?: { code?: string };
+    };
+    expect(result.data?.code).toBe("validation_error");
+  });
 
-    await unlink(validPath).catch(() => undefined);
+  it("returns validation_error when timeout is out of range", async () => {
+    const result = (await handlers["cad:run_script"](
+      { script: "import cadquery as cq", timeout: 9999 },
+      fakeRunCtx,
+    )) as { data?: { code?: string } };
+    expect(result.data?.code).toBe("validation_error");
+  });
+
+  it("returns validation_error when params is not an object", async () => {
+    const result = (await handlers["cad:run_script"]("not-an-object", fakeRunCtx)) as {
+      data?: { code?: string };
+    };
+    expect(result.data?.code).toBe("validation_error");
+  });
+
+  it("error message contains no stack trace", async () => {
+    const result = (await handlers["cad:run_script"]({}, fakeRunCtx)) as {
+      data?: { message?: string };
+    };
+    expect(result.data?.message).not.toMatch(/\s+at\s+/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC2 + AC5: Input validation — cad:export
+// ---------------------------------------------------------------------------
+
+describe("cad:export — input validation (AC2/AC5)", () => {
+  it("returns validation_error when artifactId is missing", async () => {
+    const result = (await handlers["cad:export"](
+      { format: "step" },
+      fakeRunCtx,
+    )) as { data?: { code?: string; statusCode?: number } };
+    expect(result.data?.code).toBe("validation_error");
+    expect(result.data?.statusCode).toBe(400);
+  });
+
+  it("returns validation_error when format is invalid", async () => {
+    const result = (await handlers["cad:export"](
+      { artifactId: "some-id", format: "obj" },
+      fakeRunCtx,
+    )) as { data?: { code?: string } };
+    expect(result.data?.code).toBe("validation_error");
+  });
+
+  it("returns validation_error when artifactId is empty", async () => {
+    const result = (await handlers["cad:export"](
+      { artifactId: "", format: "stl" },
+      fakeRunCtx,
+    )) as { data?: { code?: string } };
+    expect(result.data?.code).toBe("validation_error");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC3: Metrics emitted
+// ---------------------------------------------------------------------------
+
+describe("AC3: metrics", () => {
+  it("emits tool.calls on cad:run_script success", async () => {
+    const before = metricCalls.length;
+    await handlers["cad:run_script"](
+      { script: "import cadquery as cq; result = cq.Workplane().box(1,1,1)" },
+      fakeRunCtx,
+    );
+    const calls = metricCalls.slice(before);
+    const m = calls.find((c) => c.name === "tool.calls" && c.tags?.tool === "cad:run_script");
+    expect(m).toBeDefined();
+    expect(m?.value).toBe(1);
+  });
+
+  it("emits tool.duration_ms on every call", async () => {
+    const before = metricCalls.length;
+    await handlers["cad:run_script"](
+      { script: "import cadquery as cq; result = cq.Workplane().box(2,2,2)" },
+      fakeRunCtx,
+    );
+    const calls = metricCalls.slice(before);
+    const m = calls.find((c) => c.name === "tool.duration_ms" && c.tags?.tool === "cad:run_script");
+    expect(m).toBeDefined();
+    expect(typeof m?.value).toBe("number");
+  });
+
+  it("emits tool.errors on validation failure", async () => {
+    const before = metricCalls.length;
+    await handlers["cad:run_script"]({}, fakeRunCtx);
+    const calls = metricCalls.slice(before);
+    const m = calls.find((c) => c.name === "tool.errors" && c.tags?.tool === "cad:run_script");
+    expect(m).toBeDefined();
+    expect(m?.value).toBe(1);
+  });
+
+  it("does NOT emit tool.errors on success", async () => {
+    const before = metricCalls.length;
+    await handlers["cad:run_script"](
+      { script: "import cadquery as cq; result = cq.Workplane().box(3,3,3)" },
+      fakeRunCtx,
+    );
+    const calls = metricCalls.slice(before);
+    const errMetric = calls.find((c) => c.name === "tool.errors");
+    expect(errMetric).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC4: Correlation log — no payload content in logs
+// ---------------------------------------------------------------------------
+
+describe("AC4: correlation log", () => {
+  it("logs correlationId, tool, agentId, status, durationMs on success", async () => {
+    const before = logInfoCalls.length;
+    await handlers["cad:run_script"](
+      { script: "import cadquery as cq; result = cq.Workplane('XY').box(5,5,5)" },
+      fakeRunCtx,
+    );
+    const completionLog = logInfoCalls
+      .slice(before)
+      .find((l) => l.message === "tool call complete");
+    expect(completionLog).toBeDefined();
+    expect(completionLog?.meta.correlationId).toBe(fakeRunCtx.runId);
+    expect(completionLog?.meta.tool).toBe("cad:run_script");
+    expect(completionLog?.meta.agentId).toBe(fakeRunCtx.agentId);
+    expect(completionLog?.meta.status).toBe("ok");
+    expect(typeof completionLog?.meta.durationMs).toBe("number");
+  });
+
+  it("does NOT log script content in any log call", async () => {
+    const sentinel = "PAYLOAD_SENTINEL_" + Math.random().toString(36).slice(2);
+    const before = logInfoCalls.length;
+    await handlers["cad:run_script"]({ script: sentinel }, fakeRunCtx);
+    const allLogs = logInfoCalls.slice(before);
+    for (const entry of allLogs) {
+      expect(JSON.stringify(entry)).not.toContain(sentinel);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC5: Error taxonomy — worker_internal from unknown artifactId
+// ---------------------------------------------------------------------------
+
+describe("AC5: error taxonomy — worker_internal", () => {
+  it("cad:export returns worker_internal (500) for unknown artifactId", async () => {
+    const result = (await handlers["cad:export"](
+      { artifactId: "nonexistent-artifact-id-xyz", format: "step" },
+      fakeRunCtx,
+    )) as { data?: { code?: string; statusCode?: number } };
+    expect(result.data?.code).toBe("worker_internal");
+    expect(result.data?.statusCode).toBe(500);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC6: Happy path — run_script → export
+// ---------------------------------------------------------------------------
+
+describe("AC6: stub worker happy path", () => {
+  it("run_script returns { artifactId, summary }", async () => {
+    const result = (await handlers["cad:run_script"](
+      { script: "import cadquery as cq; result = cq.Workplane('XY').box(10,10,10)" },
+      fakeRunCtx,
+    )) as { data?: { artifactId?: string; summary?: string } };
+    expect(typeof result.data?.artifactId).toBe("string");
+    expect((result.data?.artifactId ?? "").length).toBeGreaterThan(0);
+    expect(typeof result.data?.summary).toBe("string");
+  });
+
+  it("export returns { filePath } for valid artifactId", async () => {
+    const runResult = (await handlers["cad:run_script"](
+      { script: "import cadquery as cq; result = cq.Workplane('XY').box(20,20,20)" },
+      fakeRunCtx,
+    )) as { data?: { artifactId?: string } };
+    const artifactId = runResult.data?.artifactId;
+    expect(typeof artifactId).toBe("string");
+
+    const exportResult = (await handlers["cad:export"](
+      { artifactId, format: "stl" },
+      fakeRunCtx,
+    )) as { data?: { filePath?: string; artifactId?: string; format?: string } };
+    expect(typeof exportResult.data?.filePath).toBe("string");
+    expect((exportResult.data?.filePath ?? "").endsWith(".stl")).toBe(true);
+    expect(exportResult.data?.artifactId).toBe(artifactId);
+    expect(exportResult.data?.format).toBe("stl");
+  });
+
+  it("export accepts all three formats: step, stl, 3mf", async () => {
+    const runResult = (await handlers["cad:run_script"](
+      { script: "import cadquery as cq; result = cq.Workplane('XY').box(5,5,5)" },
+      fakeRunCtx,
+    )) as { data?: { artifactId?: string } };
+    const artifactId = runResult.data?.artifactId as string;
+
+    for (const format of ["step", "stl", "3mf"] as const) {
+      const r = (await handlers["cad:export"](
+        { artifactId, format },
+        fakeRunCtx,
+      )) as { data?: { filePath?: string } };
+      expect(r.data?.filePath).toMatch(new RegExp(`\\.${format}$`));
+    }
   });
 });

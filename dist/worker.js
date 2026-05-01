@@ -1,503 +1,244 @@
-// src/worker.ts
-import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
-var DEFAULT_ARTIFACT_REPO_URL = "https://github.com/claudegoogl-sudo/cad-artifacts.git";
-var DEFAULT_ARTIFACT_BRANCH = "main";
-var PushError = class extends Error {
-  kind;
-  httpStatus;
-  constructor(kind, message, httpStatus) {
-    super(message);
-    this.name = "PushError";
-    this.kind = kind;
-    this.httpStatus = httpStatus;
+// src/stub-cad-worker.ts
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
+var CadWorkerTimeoutError = class extends Error {
+  code = "worker_timeout";
+  constructor(timeoutSeconds) {
+    super(`CAD script execution timed out after ${timeoutSeconds}s`);
+    this.name = "CadWorkerTimeoutError";
   }
 };
-function githubHeaders(pat) {
+var CadWorkerInternalError = class extends Error {
+  code = "worker_internal";
+  constructor(message) {
+    super(message);
+    this.name = "CadWorkerInternalError";
+  }
+};
+var ARTIFACT_STAGING_DIR = join(tmpdir(), "paperclip-cad-staging");
+var artifactRegistry = /* @__PURE__ */ new Map();
+function createCadWorker() {
   return {
-    Authorization: `Bearer ${pat}`,
-    Accept: "application/vnd.github+json",
-    "X-GitHub-Api-Version": "2022-11-28",
-    "Content-Type": "application/json",
-    "User-Agent": "paperclip-plugin-cad/0.1.0"
-  };
-}
-function parseGitHubUrl(repoUrl) {
-  const match = repoUrl.match(/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/);
-  if (!match) {
-    throw new PushError(
-      "prerequisite_missing",
-      `Cannot parse GitHub URL: ${repoUrl}`
-    );
-  }
-  return [match[1], match[2]];
-}
-async function checkRepoPrerequisite(pat, repoUrl) {
-  const [owner, repo] = parseGitHubUrl(repoUrl);
-  const headers = githubHeaders(pat);
-  let resp;
-  try {
-    resp = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
-      headers
-    });
-  } catch (err) {
-    throw new PushError(
-      "network",
-      `Network error reaching artifact repo ${owner}/${repo}: ${err.message}`
-    );
-  }
-  if (resp.status === 404) {
-    throw new PushError(
-      "prerequisite_missing",
-      `Artifact repo not found (404): ${owner}/${repo}. Operator action required: pre-create the repo and ensure the PAT has 'repo' (or 'public_repo') scope. See PLA-56 AC#1.`,
-      404
-    );
-  }
-  if (resp.status === 401 || resp.status === 403) {
-    throw new PushError(
-      "prerequisite_missing",
-      `Artifact repo not accessible (${resp.status}): ${owner}/${repo}. Operator action required: verify the PAT has 'repo' (or 'public_repo') scope and correct org membership. See PLA-56 AC#1.`,
-      resp.status
-    );
-  }
-  if (!resp.ok) {
-    throw new PushError(
-      "network",
-      `Unexpected ${resp.status} checking artifact repo ${owner}/${repo}. Retry later.`,
-      resp.status
-    );
-  }
-}
-async function checkArtifactExists(pat, repoUrl, repoPath) {
-  let owner, repo;
-  try {
-    [owner, repo] = parseGitHubUrl(repoUrl);
-  } catch {
-    return null;
-  }
-  const headers = githubHeaders(pat);
-  let contentsResp;
-  try {
-    contentsResp = await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/contents/${repoPath}`,
-      { headers }
-    );
-  } catch {
-    return null;
-  }
-  if (!contentsResp.ok) return null;
-  const contentsData = await contentsResp.json();
-  try {
-    const commitResp = await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/commits?path=${encodeURIComponent(repoPath)}&per_page=1`,
-      { headers }
-    );
-    if (commitResp.ok) {
-      const commits = await commitResp.json();
-      const commitSha = commits[0]?.sha;
-      if (commitSha) {
-        return {
-          commitSha,
-          permalink: `https://github.com/${owner}/${repo}/blob/${commitSha}/${repoPath}`
-        };
+    async runScript(script, _timeoutSeconds) {
+      const artifactId = randomUUID();
+      artifactRegistry.set(artifactId, {
+        scriptDigest: `len=${script.length}`
+      });
+      return {
+        artifactId,
+        summary: `[stub] Script accepted (${script.length} chars). Real CadQuery execution wires in with sub-goal 2.`
+      };
+    },
+    async export(artifactId, format) {
+      const entry = artifactRegistry.get(artifactId);
+      if (!entry) {
+        throw new CadWorkerInternalError(
+          `Unknown artifactId: ${artifactId}. Ensure cad:run_script was called first.`
+        );
       }
+      await mkdir(ARTIFACT_STAGING_DIR, { recursive: true });
+      const filePath = join(ARTIFACT_STAGING_DIR, `${artifactId}.${format}`);
+      await writeFile(
+        filePath,
+        `; CAD stub artifact
+; id=${artifactId}
+; format=${format}
+; script=${entry.scriptDigest}
+`
+      );
+      return { filePath };
     }
-  } catch {
+  };
+}
+
+// src/worker.ts
+import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
+import { createHash } from "node:crypto";
+function shortDigest(s) {
+  return `sha256:${createHash("sha256").update(s).digest("hex").slice(0, 16)}`;
+}
+function errorStatusCode(code) {
+  switch (code) {
+    case "validation_error":
+      return 400;
+    case "auth":
+      return 403;
+    case "worker_internal":
+      return 500;
+    case "worker_timeout":
+      return 504;
+  }
+}
+function makeError(code, message) {
+  return {
+    error: `${code}: ${message}`,
+    data: { code, message, statusCode: errorStatusCode(code) }
+  };
+}
+async function withObservability(ctx, runCtx, toolName, fn) {
+  const start = Date.now();
+  const correlationId = runCtx.runId;
+  let status = "ok";
+  let result;
+  await ctx.metrics.write("tool.calls", 1, { tool: toolName });
+  try {
+    result = await fn();
+    if (result.error) {
+      const data = result.data;
+      status = data?.code ?? "error";
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unexpected error in tool handler";
+    result = makeError("worker_internal", message);
+    status = "worker_internal";
+  }
+  const durationMs = Date.now() - start;
+  if (status !== "ok") {
+    await ctx.metrics.write("tool.errors", 1, { tool: toolName });
+  }
+  await ctx.metrics.write("tool.duration_ms", durationMs, { tool: toolName });
+  ctx.logger.info("tool call complete", {
+    correlationId,
+    tool: toolName,
+    agentId: runCtx.agentId,
+    status,
+    durationMs
+  });
+  return result;
+}
+function validateRunScript(raw) {
+  if (typeof raw !== "object" || raw === null) {
+    return { ok: false, message: "params must be an object" };
+  }
+  const p = raw;
+  if (typeof p.script !== "string" || p.script.length === 0) {
+    return { ok: false, message: "'script' is required and must be a non-empty string" };
+  }
+  if (p.timeout !== void 0) {
+    const t = Number(p.timeout);
+    if (!Number.isInteger(t) || t < 1 || t > 300) {
+      return { ok: false, message: "'timeout' must be an integer between 1 and 300" };
+    }
+  }
+  return { ok: true, params: { script: p.script, timeout: p.timeout } };
+}
+function validateExport(raw) {
+  if (typeof raw !== "object" || raw === null) {
+    return { ok: false, message: "params must be an object" };
+  }
+  const p = raw;
+  if (typeof p.artifactId !== "string" || p.artifactId.length === 0) {
+    return { ok: false, message: "'artifactId' is required and must be a non-empty string" };
+  }
+  const validFormats = ["step", "stl", "3mf"];
+  if (!validFormats.includes(p.format)) {
+    return { ok: false, message: `'format' must be one of: ${validFormats.join(", ")}` };
   }
   return {
-    commitSha: contentsData.sha ?? "unknown",
-    permalink: contentsData.html_url ?? `https://github.com/${owner}/${repo}/blob/main/${repoPath}`
+    ok: true,
+    params: {
+      artifactId: p.artifactId,
+      format: p.format
+    }
   };
 }
-async function pushArtifactToGitHub(pat, repoUrl, branch, localFile, repoPath, message) {
-  const [owner, repo] = parseGitHubUrl(repoUrl);
-  const { readFile } = await import("node:fs/promises");
-  const content = await readFile(localFile);
-  const contentBase64 = content.toString("base64");
-  const apiBase = `https://api.github.com/repos/${owner}/${repo}/contents/${repoPath}`;
-  const headers = githubHeaders(pat);
-  let existingSha;
-  let getResp;
-  try {
-    getResp = await fetch(apiBase, { headers });
-  } catch (err) {
-    throw new PushError(
-      "network",
-      `Network error fetching existing file at ${repoPath}: ${err.message}`
-    );
-  }
-  if (getResp.ok) {
-    const existing = await getResp.json();
-    existingSha = existing.sha;
-  } else if (getResp.status === 401 || getResp.status === 403) {
-    throw new PushError(
-      "auth",
-      `GitHub auth failed (${getResp.status}) reading ${repoPath}. Rotate the PAT stored in the secret referenced by config.githubPatSecretId.`,
-      getResp.status
-    );
-  } else if (getResp.status >= 500) {
-    throw new PushError(
-      "network",
-      `GitHub API ${getResp.status} reading ${repoPath}. Retry this call.`,
-      getResp.status
-    );
-  }
-  const body = {
-    message,
-    content: contentBase64,
-    branch
-  };
-  if (existingSha) body.sha = existingSha;
-  let putResp;
-  try {
-    putResp = await fetch(apiBase, {
-      method: "PUT",
-      headers,
-      body: JSON.stringify(body)
-    });
-  } catch (err) {
-    throw new PushError(
-      "network",
-      `Network error during push of ${repoPath}: ${err.message}`
-    );
-  }
-  if (!putResp.ok) {
-    const status = putResp.status;
-    if (status === 401 || status === 403) {
-      throw new PushError(
-        "auth",
-        `GitHub push auth failed (${status}). Rotate the PAT stored in the secret referenced by config.githubPatSecretId.`,
-        status
-      );
-    }
-    if (status === 409 || status === 422) {
-      throw new PushError(
-        "conflict",
-        `GitHub returned ${status} conflict on ${repoPath}. Re-fetch the file SHA and retry once.`,
-        status
-      );
-    }
-    if (status >= 500) {
-      throw new PushError(
-        "network",
-        `GitHub API ${status} during push of ${repoPath}. Retry this call.`,
-        status
-      );
-    }
-    const errText = await putResp.text();
-    throw new PushError(
-      "network",
-      `GitHub API error ${status} pushing ${repoPath}: ${errText}`,
-      status
-    );
-  }
-  const result = await putResp.json();
-  const commitSha = result.commit?.sha ?? "";
-  const permalink = `https://github.com/${owner}/${repo}/blob/${commitSha}/${repoPath}`;
-  return { commitSha, permalink };
-}
-async function renderCadScript(script, format) {
-  const { tmpdir } = await import("node:os");
-  const { join } = await import("node:path");
-  const artifactPath = join(tmpdir(), `cad-${Date.now()}.${format}`);
-  const { writeFile } = await import("node:fs/promises");
-  await writeFile(artifactPath, `; CAD stub \u2014 script hash: ${script.length}`);
-  return artifactPath;
-}
+var DEFAULT_TIMEOUT_S = 30;
 var plugin = definePlugin({
   async setup(ctx) {
-    ctx.logger.info("CAD plugin worker starting");
+    ctx.logger.info("CAD plugin worker starting (v0.1.0 \u2014 cad:run_script + cad:export)");
+    const cadWorker = createCadWorker();
     ctx.tools.register(
-      "hello",
+      "cad:run_script",
       {
-        displayName: "CAD Hello",
-        description: "Stub tool \u2014 returns a canned OK response with no side effects.",
+        displayName: "CAD Run Script",
+        description: "Execute a CadQuery Python script. Returns { artifactId, summary }.",
         parametersSchema: {
           type: "object",
           properties: {
-            name: {
-              type: "string",
-              description: "Optional greeting name. Defaults to 'world'."
-            }
+            script: { type: "string" },
+            timeout: { type: "integer", minimum: 1, maximum: 300 }
           },
-          required: [],
+          required: ["script"],
           additionalProperties: false
         }
       },
-      async (params, runCtx) => {
-        const correlationId = runCtx.runId;
-        const startMs = Date.now();
-        ctx.logger.info("cad:hello: entry", {
-          correlationId,
-          agentId: runCtx.agentId
-        });
-        const { name = "world" } = params ?? {};
-        const result = {
-          ok: true,
-          message: `Hello, ${name}! paperclip-plugin-cad v0.1.0 is ready.`
-        };
-        const latencyMs = Date.now() - startMs;
-        await ctx.metrics.write("tool.calls", 1, { tool: "cad:hello" });
-        await ctx.metrics.write("tool.latency_ms", latencyMs, {
-          tool: "cad:hello"
-        });
-        ctx.logger.info("cad:hello: exit", { correlationId, latencyMs });
-        return { content: result.message, data: result };
-      }
-    );
-    ctx.tools.register(
-      "cad_render",
-      {
-        displayName: "CAD Render",
-        description: "Execute a CadQuery Python script and return the resulting 3D model artifact path.",
-        parametersSchema: {
-          type: "object",
-          properties: {
-            script: { type: "string", description: "CadQuery Python script." },
-            format: {
-              type: "string",
-              enum: ["step", "stl"],
-              description: "Output format. Defaults to 'step'."
-            }
-          },
-          required: ["script"]
-        }
-      },
-      async (params) => {
-        const { script, format = "step" } = params;
-        ctx.logger.info("cad_render: starting render", { format });
-        const artifactPath = await renderCadScript(script, format);
-        ctx.logger.info("cad_render: render complete", { artifactPath, format });
-        return { content: artifactPath, data: { artifactPath, format } };
-      }
-    );
-    ctx.tools.register(
-      "cad_commit",
-      {
-        displayName: "CAD Commit Artifact",
-        description: "Commit a previously rendered CAD artifact to the project GitHub repository.",
-        parametersSchema: {
-          type: "object",
-          properties: {
-            artifactPath: {
-              type: "string",
-              description: "Local artifact path from cad_render."
-            },
-            repoPath: {
-              type: "string",
-              description: "Target path in the repository."
-            },
-            commitMessage: {
-              type: "string",
-              description: "Git commit message."
-            }
-          },
-          required: ["artifactPath", "repoPath", "commitMessage"]
-        }
-      },
-      async (params) => {
-        const { artifactPath, repoPath, commitMessage } = params;
-        const { resolve } = await import("node:path");
-        const { tmpdir } = await import("node:os");
-        const resolvedArtifactPath = resolve(artifactPath);
-        const allowedPrefix = tmpdir();
-        if (!resolvedArtifactPath.startsWith(allowedPrefix + "/")) {
-          ctx.logger.warn("cad_commit: rejected out-of-bounds artifactPath", {
-            resolvedArtifactPath
-          });
-          return {
-            data: { error: "artifactPath must be within the temp directory." }
-          };
-        }
-        const config = await ctx.config.get();
-        if (!config.githubPatSecretId) {
-          return {
-            data: {
-              error: "githubPatSecretId is not configured. Set it in plugin instance config."
-            }
-          };
-        }
-        ctx.logger.info("cad_commit: resolving GitHub PAT from secrets DB");
-        const pat = await ctx.secrets.resolve(config.githubPatSecretId);
-        ctx.logger.info("cad_commit: pushing artifact", { repoPath });
-        const repoUrl = "https://github.com/claudegoogl-sudo/paperclip-plugin-cad.git";
-        const { commitSha } = await pushArtifactToGitHub(
-          pat,
-          repoUrl,
-          DEFAULT_ARTIFACT_BRANCH,
-          resolvedArtifactPath,
-          repoPath,
-          commitMessage
-        );
-        ctx.logger.info("cad_commit: artifact committed", {
-          repoPath,
-          commitSha
-        });
-        return {
-          content: `Artifact committed to ${repoPath} (${commitSha})`,
-          data: { repoPath, commitSha }
-        };
-      }
-    );
-    ctx.tools.register(
-      "cad_export",
-      {
-        displayName: "CAD Export & Commit",
-        description: "Render a CadQuery script and commit the artifact to the configured GitHub artifact repo. Returns commitSha, permalink, and artifactPath. Idempotent: if the same toolCallId was already pushed, returns the existing commit info without re-pushing.",
-        parametersSchema: {
-          type: "object",
-          properties: {
-            script: {
-              type: "string",
-              description: "CadQuery Python script to render."
-            },
-            format: {
-              type: "string",
-              enum: ["step", "stl"],
-              description: "Output format. Defaults to 'step'."
-            },
-            paperclipTicketId: {
-              type: "string",
-              description: "Paperclip ticket ID (e.g. PLA-56). Included in artifact path and commit message."
-            },
-            toolCallId: {
-              type: "string",
-              description: "Unique ID for this tool call. Used for deterministic artifact path and idempotency."
-            },
-            filename: {
-              type: "string",
-              description: "Optional artifact filename. Defaults to 'artifact.<format>'."
-            }
-          },
-          required: ["script", "paperclipTicketId", "toolCallId"]
-        }
-      },
-      async (params) => {
-        const {
-          script,
-          format = "step",
-          paperclipTicketId,
-          toolCallId,
-          filename
-        } = params;
-        ctx.logger.info("cad_export: starting", {
-          format,
-          paperclipTicketId,
-          toolCallId
-        });
-        const config = await ctx.config.get();
-        if (!config.githubPatSecretId) {
-          return {
-            data: {
-              error: "prerequisite_missing",
-              message: "githubPatSecretId is not configured. Set it in plugin instance config."
-            }
-          };
-        }
-        const repoUrl = config.artifactRepoUrl ?? DEFAULT_ARTIFACT_REPO_URL;
-        const branch = config.artifactRepoBranch ?? DEFAULT_ARTIFACT_BRANCH;
-        const resolvedFilename = filename ?? `artifact.${format}`;
-        const repoPath = `artifacts/${paperclipTicketId}/${toolCallId}/${resolvedFilename}`;
-        ctx.logger.info("cad_export: resolving GitHub PAT");
-        const pat = await ctx.secrets.resolve(config.githubPatSecretId);
-        try {
-          await checkRepoPrerequisite(pat, repoUrl);
-        } catch (err) {
-          if (err instanceof PushError && err.kind === "prerequisite_missing") {
-            ctx.logger.warn(
-              "cad_export: artifact repo prerequisite check failed",
-              {
-                repoUrl,
-                httpStatus: err.httpStatus
-                // PAT intentionally omitted from this log.
-              }
-            );
-            return {
-              data: {
-                error: "prerequisite_missing",
-                message: err.message
-              }
-            };
+      async (rawParams, runCtx) => {
+        return withObservability(ctx, runCtx, "cad:run_script", async () => {
+          const validation = validateRunScript(rawParams);
+          if (!validation.ok) {
+            return makeError("validation_error", validation.message);
           }
-          throw err;
-        }
-        ctx.logger.info("cad_export: checking idempotency", { repoPath });
-        const existing = await checkArtifactExists(pat, repoUrl, repoPath);
-        if (existing) {
-          ctx.logger.info("cad_export: artifact already exists (idempotent)", {
-            repoPath,
-            commitSha: existing.commitSha
+          const { script, timeout = DEFAULT_TIMEOUT_S } = validation.params;
+          ctx.logger.info("cad:run_script dispatching to worker", {
+            correlationId: runCtx.runId,
+            agentId: runCtx.agentId,
+            scriptDigest: shortDigest(script),
+            scriptLen: script.length,
+            timeoutSeconds: timeout
           });
-          return {
-            content: `Artifact already present at ${repoPath} (${existing.commitSha})`,
-            data: {
-              commitSha: existing.commitSha,
-              permalink: existing.permalink,
-              artifactPath: repoPath
-            }
-          };
-        }
-        ctx.logger.info("cad_export: rendering CAD script", { format });
-        const localFile = await renderCadScript(script, format);
-        ctx.logger.info("cad_export: render complete", { localFile, format });
-        const commitMessage = `CAD artifact: ticket=${paperclipTicketId} tool=cad_export call=${toolCallId}`;
-        const doPush = () => pushArtifactToGitHub(
-          pat,
-          repoUrl,
-          branch,
-          localFile,
-          repoPath,
-          commitMessage
-        );
-        ctx.logger.info("cad_export: pushing artifact", { repoPath, branch });
-        try {
-          let pushResult;
           try {
-            pushResult = await doPush();
-          } catch (firstErr) {
-            if (firstErr instanceof PushError && firstErr.kind === "conflict") {
-              ctx.logger.warn(
-                "cad_export: conflict on push, retrying once",
-                { repoPath }
-              );
-              pushResult = await doPush();
-            } else {
-              throw firstErr;
-            }
-          }
-          ctx.logger.info("cad_export: artifact committed", {
-            repoPath,
-            commitSha: pushResult.commitSha
-          });
-          return {
-            content: `Artifact committed: ${pushResult.permalink}`,
-            data: {
-              commitSha: pushResult.commitSha,
-              permalink: pushResult.permalink,
-              artifactPath: repoPath
-            }
-          };
-        } catch (err) {
-          if (err instanceof PushError) {
-            ctx.logger.warn("cad_export: push failed", {
-              kind: err.kind,
-              httpStatus: err.httpStatus
-              // PAT intentionally omitted from this log.
-            });
+            const workerResult = await cadWorker.runScript(script, timeout);
             return {
-              data: {
-                error: err.kind,
-                message: err.message
-              }
+              content: `Artifact created: ${workerResult.artifactId}
+${workerResult.summary}`,
+              data: { artifactId: workerResult.artifactId, summary: workerResult.summary }
             };
+          } catch (err) {
+            if (err instanceof CadWorkerTimeoutError) return makeError("worker_timeout", err.message);
+            if (err instanceof CadWorkerInternalError) return makeError("worker_internal", err.message);
+            return makeError("worker_internal", err instanceof Error ? err.message : "Unknown worker error");
           }
-          throw err;
-        }
+        });
       }
     );
-    ctx.logger.info("CAD plugin worker setup complete");
+    ctx.tools.register(
+      "cad:export",
+      {
+        displayName: "CAD Export",
+        description: "Export a staged artifact to step|stl|3mf. Returns { filePath } within the plugin artifact-staging area.",
+        parametersSchema: {
+          type: "object",
+          properties: {
+            artifactId: { type: "string" },
+            format: { type: "string", enum: ["step", "stl", "3mf"] }
+          },
+          required: ["artifactId", "format"],
+          additionalProperties: false
+        }
+      },
+      async (rawParams, runCtx) => {
+        return withObservability(ctx, runCtx, "cad:export", async () => {
+          const validation = validateExport(rawParams);
+          if (!validation.ok) {
+            return makeError("validation_error", validation.message);
+          }
+          const { artifactId, format } = validation.params;
+          ctx.logger.info("cad:export dispatching to worker", {
+            correlationId: runCtx.runId,
+            agentId: runCtx.agentId,
+            artifactId,
+            format
+          });
+          try {
+            const workerResult = await cadWorker.export(artifactId, format);
+            return {
+              content: `Exported ${artifactId} as ${format}: ${workerResult.filePath}`,
+              data: { filePath: workerResult.filePath, artifactId, format }
+            };
+          } catch (err) {
+            if (err instanceof CadWorkerTimeoutError) return makeError("worker_timeout", err.message);
+            if (err instanceof CadWorkerInternalError) return makeError("worker_internal", err.message);
+            return makeError("worker_internal", err instanceof Error ? err.message : "Unknown worker error");
+          }
+        });
+      }
+    );
+    ctx.logger.info("CAD plugin worker setup complete", { tools: ["cad:run_script", "cad:export"] });
   },
   async onHealth() {
-    return { status: "ok", message: "CAD plugin worker is running" };
+    return { status: "ok", message: "CAD plugin worker is running (stub worker \u2014 PLA-55 sub-goal 3)" };
   }
 });
 var worker_default = plugin;

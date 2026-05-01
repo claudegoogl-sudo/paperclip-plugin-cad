@@ -6,20 +6,21 @@ const manifest: PaperclipPluginManifestV1 = {
   version: "0.1.0",
   displayName: "CAD (CadQuery)",
   description:
-    "Lets agents design and render 3D CAD models via CadQuery tool calls, " +
-    "and commit the resulting artifacts to a project GitHub repository.",
+    "Lets agents design and export 3D CAD models via CadQuery tool calls. " +
+    "v0.1.0 surface: cad:run_script (execute Python → staged artifact) and " +
+    "cad:export (staged artifact → local file). Operator-confirmed via approval f420bc31.",
   author: "Platform",
   categories: ["connector"],
 
-  // Capabilities required by this plugin:
-  //   secrets.read-ref       — ctx.secrets.resolve for GitHub PAT
-  //   agent.tools.register   — register CAD tool handlers for agents
-  //   http.outbound          — CAD worker subprocess + git push to GitHub
-  //   metrics.write          — push error/success counters (PLA-56 observability)
+  // Capabilities (v0.1.0):
+  //   agent.tools.register — register cad:run_script and cad:export
+  //   http.outbound        — reserved; real CadQuery worker (sub-goal 2)
+  //   secrets.read-ref     — reserved; future worker auth flows (sub-goal 2)
+  //   metrics.write        — ctx.metrics counters + duration histograms (AC3)
   capabilities: [
-    "secrets.read-ref",
     "agent.tools.register",
     "http.outbound",
+    "secrets.read-ref",
     "metrics.write",
   ],
 
@@ -27,144 +28,60 @@ const manifest: PaperclipPluginManifestV1 = {
     worker: "./dist/worker.js",
   },
 
-  // instanceConfigSchema ties secret-scope strictly to githubPatSecretId.
-  // Without this the host uses a wider heuristic ("any UUID in config is
-  // resolvable"). Declaring it here means only the field below is eligible
-  // for ctx.secrets.resolve calls.  — PLA-41 remediation #2
-  instanceConfigSchema: {
-    type: "object",
-    properties: {
-      githubPatSecretId: {
-        type: "string",
-        format: "secret-ref",
-        description:
-          "Paperclip secret UUID for the GitHub PAT used to push CAD artifacts. " +
-          "Create the secret in the board UI and paste its UUID here.",
-      },
-      artifactRepoUrl: {
-        type: "string",
-        description:
-          "HTTPS clone URL of the GitHub repository where CAD artifacts are stored. " +
-          "Defaults to https://github.com/claudegoogl-sudo/cad-artifacts.git. " +
-          "Operator must pre-create this repo; the plugin is push-only (PLA-56 AC#2).",
-      },
-      artifactRepoBranch: {
-        type: "string",
-        description: "Branch to commit artifacts to. Defaults to 'main'.",
-      },
-    },
-    required: ["githubPatSecretId"],
-  },
-
+  // v0.1.0 tool surface — operator-confirmed via approval f420bc31 (2026-05-01).
+  // cad:hello (PLA-39 scaffold stub) intentionally removed here (AC7).
+  // cad_render / cad_commit / cad_export (intermediate work) also removed.
   tools: [
     {
-      // Stub tool — PLA-53: proves the PLA-39 agent-JWT dispatch path
-      // end-to-end before any real CAD code lands. No side effects.
-      name: "hello",
-      displayName: "CAD Hello",
+      name: "cad:run_script",
+      displayName: "CAD Run Script",
       description:
-        "Stub tool that returns a canned OK response with no side effects. " +
-        "Verifies the plugin tool dispatch path (PLA-53 AC4).",
+        "Execute a CadQuery Python script string. " +
+        "Returns { artifactId, summary }. The artifact is staged locally; " +
+        "use cad:export to retrieve it in a specific file format.",
       parametersSchema: {
         type: "object",
         properties: {
-          name: {
+          script: {
             type: "string",
-            description: "Optional greeting name. Defaults to 'world'.",
+            description:
+              "CadQuery Python script to execute. Must define a CadQuery shape.",
+          },
+          timeout: {
+            type: "integer",
+            minimum: 1,
+            maximum: 300,
+            description:
+              "Execution timeout in seconds (1–300, default: 30). " +
+              "Enforced by the CAD worker (sub-goal 2); stub accepts but ignores.",
           },
         },
-        required: [],
+        required: ["script"],
         additionalProperties: false,
       },
     },
     {
-      name: "cad_render",
-      displayName: "CAD Render",
+      name: "cad:export",
+      displayName: "CAD Export",
       description:
-        "Execute a CadQuery Python script and return the resulting 3D model " +
-        "as a STEP/STL artifact URL. The script runs in an isolated subprocess.",
+        "Export a previously staged CAD artifact to a specific file format. " +
+        "Returns { filePath } within the plugin artifact-staging area. " +
+        "NOT a URL — sub-goal 5 wires the artifact-persistence pipeline.",
       parametersSchema: {
         type: "object",
         properties: {
-          script: {
+          artifactId: {
             type: "string",
-            description:
-              "CadQuery Python script to execute. Must produce a final Shape " +
-              "object assigned to `result`.",
+            description: "Artifact ID returned by cad:run_script.",
           },
           format: {
             type: "string",
-            enum: ["step", "stl"],
-            description: "Output file format. Defaults to 'step'.",
+            enum: ["step", "stl", "3mf"],
+            description: "Output file format.",
           },
         },
-        required: ["script"],
-      },
-    },
-    {
-      name: "cad_commit",
-      displayName: "CAD Commit Artifact",
-      description:
-        "Commit a previously rendered CAD artifact to the project GitHub repository " +
-        "and return the commit URL.",
-      parametersSchema: {
-        type: "object",
-        properties: {
-          artifactPath: {
-            type: "string",
-            description: "Local artifact path returned by cad_render.",
-          },
-          repoPath: {
-            type: "string",
-            description:
-              "Target path within the repository (e.g. 'parts/bracket.step').",
-          },
-          commitMessage: {
-            type: "string",
-            description: "Git commit message.",
-          },
-        },
-        required: ["artifactPath", "repoPath", "commitMessage"],
-      },
-    },
-    {
-      name: "cad_export",
-      displayName: "CAD Export & Commit",
-      description:
-        "Render a CadQuery script and commit the artifact to the configured GitHub " +
-        "artifact repository in a single call. " +
-        "Artifact path is deterministic: artifacts/{paperclipTicketId}/{toolCallId}/{filename}. " +
-        "Idempotent: re-calling with the same toolCallId returns the existing commit info. " +
-        "Returns commitSha, permalink, and artifactPath on success.",
-      parametersSchema: {
-        type: "object",
-        properties: {
-          script: {
-            type: "string",
-            description: "CadQuery Python script to render.",
-          },
-          format: {
-            type: "string",
-            enum: ["step", "stl"],
-            description: "Output file format. Defaults to 'step'.",
-          },
-          paperclipTicketId: {
-            type: "string",
-            description:
-              "Paperclip ticket ID (e.g. PLA-56). Used in the artifact path and commit message.",
-          },
-          toolCallId: {
-            type: "string",
-            description:
-              "Unique ID for this tool call. Used for deterministic artifact path and idempotency.",
-          },
-          filename: {
-            type: "string",
-            description:
-              "Optional artifact filename. Defaults to 'artifact.<format>'.",
-          },
-        },
-        required: ["script", "paperclipTicketId", "toolCallId"],
+        required: ["artifactId", "format"],
+        additionalProperties: false,
       },
     },
   ],
