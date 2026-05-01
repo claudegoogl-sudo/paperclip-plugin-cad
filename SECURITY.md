@@ -69,6 +69,25 @@ This repository is public per Discovery R4 and operator approval `f420bc31` (ite
 
 ---
 
+## Dependency audit
+
+Worker Python dependencies (`worker/requirements-cad.txt`) are scanned for known CVEs on every pull request and every push to `main` via the `pip-audit` CI merge gate defined in `.github/workflows/pip-audit.yml`.
+
+**What runs:**
+
+```bash
+pip install pip-audit
+pip-audit -r worker/requirements-cad.txt
+```
+
+The step fails the build on any known CVE found in the PyPI advisory database. All pins use `==` (exact versions) to make the scan deterministic.
+
+**Baseline scan (2026-05-01):** clean — no known vulnerabilities against the pinned versions listed in `worker/requirements-cad.txt`.
+
+This gate was added in [PLA-77](/PLA/issues/PLA-77) as a remediation for finding LOW-1 in security review [PLA-73](/PLA/issues/PLA-73).
+
+---
+
 ## Links
 
 - [README.md](./README.md) — install and quick-start
