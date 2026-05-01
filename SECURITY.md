@@ -9,7 +9,7 @@ Tracker: [PLA-32](/PLA/issues/PLA-32)
 The GitHub Personal Access Token (PAT) is a sensitive credential. The plugin follows a strict per-call, no-cache pattern:
 
 1. The PAT is stored as a Paperclip secret. Its UUID is the only thing held in plugin instance config (`githubPatSecretId`).
-2. On each `cad_commit` call, the worker resolves the PAT with `ctx.secrets.resolve(config.githubPatSecretId)`. The UUID is passed directly — a string name would throw `InvalidSecretRefError` at the secrets handler boundary.
+2. On each `cad:export` call, the worker resolves the PAT with `ctx.secrets.resolve(config.githubPatSecretId)`. The UUID is passed directly — a string name would throw `InvalidSecretRefError` at the secrets handler boundary.
 3. The resolved PAT is passed immediately into `pushArtifactToGitHub` and used within that function's stack frame only.
 4. The PAT is **never** logged, cached in `ctx.state`, stored in any persistent store, or returned from a tool call.
 5. After `pushArtifactToGitHub` returns, the PAT goes out of scope and is eligible for GC.
@@ -34,7 +34,7 @@ CadQuery scripts supplied by agents run in a per-request subprocess spawned by t
 
 ### Path-traversal prevention
 
-`cad_commit` resolves the agent-supplied `artifactPath` to an absolute path and checks that it begins with the OS temp directory prefix (`os.tmpdir() + "/"`). Paths outside that prefix are rejected and a descriptive error is returned to the agent — no file read or push occurs. This control was added in [PLA-50](/PLA/issues/PLA-50).
+`cad:export` resolves the agent-supplied `artifactPath` to an absolute path and checks that it begins with the OS temp directory prefix (`os.tmpdir() + "/"`). Paths outside that prefix are rejected and a descriptive error is returned to the agent — no file read or push occurs. This control was added in [PLA-50](/PLA/issues/PLA-50).
 
 ---
 
