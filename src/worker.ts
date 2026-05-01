@@ -48,6 +48,15 @@ const DEFAULT_ARTIFACT_BRANCH = "main";
 
 // ---------------------------------------------------------------------------
 // Artifact staging map (cad:run_script → cad:export handoff)
+//
+// PLA-80 (F6): plugin workers are shared across all agents/companies on a host
+// (one worker per plugin per Paperclip instance — see plugin-worker-manager and
+// PLUGIN_SPEC.md §12). Keying the staging map by `artifactId` alone would let
+// agent B in company Y read agent A in company X's staged artifact if the id
+// ever leaks (logs, comments, brute force on the ~32-bit id space). Compose the
+// map key from `companyId:agentId:artifactId` sourced from the runCtx so the
+// caller's identity is part of the lookup. Mismatched callers fall through to
+// the same "not found" error path as missing entries (no oracle).
 // ---------------------------------------------------------------------------
 
 interface StagingEntry {
@@ -56,6 +65,10 @@ interface StagingEntry {
 }
 
 const artifactStagingMap = new Map<string, StagingEntry>();
+
+function stagingMapKey(companyId: string, agentId: string, artifactId: string): string {
+  return `${companyId}:${agentId}:${artifactId}`;
+}
 
 // ---------------------------------------------------------------------------
 // Typed push errors (PLA-56)
@@ -93,6 +106,8 @@ function workerInternalError(message: string) {
 interface RunCtx {
   agentId?: string;
   runId?: string;
+  companyId?: string;
+  projectId?: string;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -304,6 +319,18 @@ const plugin = definePlugin({
         const script = p.script as string;
         const timeoutSeconds = typeof p.timeout === "number" ? p.timeout : WORKER_DEFAULT_TIMEOUT;
 
+        // PLA-80 (F6): companyId+agentId are required to scope the staging map
+        // entry to the calling tenant. Without them we cannot safely store the
+        // artifact, since any later caller would match the un-scoped key.
+        if (typeof runCtx.companyId !== "string" || runCtx.companyId.length === 0 ||
+            typeof runCtx.agentId !== "string" || runCtx.agentId.length === 0) {
+          ctx.logger.warn("cad:run_script: missing tenant context on runCtx");
+          const ms = Date.now() - t0;
+          await emitMetrics(anyCtx, tool, ms, true);
+          logCompletion(ctx, tool, runCtx, ms, "error");
+          return validationError("missing tenant context (companyId/agentId) on runCtx");
+        }
+
         ctx.logger.info("cad:run_script: rendering", { scriptLength: script.length, timeoutSeconds });
 
         let stepPath: string;
@@ -319,7 +346,11 @@ const plugin = definePlugin({
         }
 
         const artifactId = `cad-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        artifactStagingMap.set(artifactId, { script, stepPath });
+        // PLA-80 (F6): key by tuple sourced from runCtx, never from agent input.
+        artifactStagingMap.set(
+          stagingMapKey(runCtx.companyId, runCtx.agentId, artifactId),
+          { script, stepPath },
+        );
         ctx.logger.info("cad:run_script: staged", { artifactId });
 
         const ms = Date.now() - t0;
@@ -391,7 +422,17 @@ const plugin = definePlugin({
 
         ctx.logger.info("cad:export: starting", { artifactId, format });
 
-        const stagingEntry = artifactStagingMap.get(artifactId);
+        // PLA-80 (F6): scoped lookup by (companyId, agentId, artifactId). If the
+        // calling runCtx does not match the entry's caller, fall through to the
+        // SAME error response as a genuinely missing entry — do not distinguish,
+        // to avoid an oracle that lets one tenant probe another's id space.
+        // Missing tenant context on runCtx is treated identically.
+        const hasTenantCtx =
+          typeof runCtx.companyId === "string" && runCtx.companyId.length > 0 &&
+          typeof runCtx.agentId === "string" && runCtx.agentId.length > 0;
+        const stagingEntry = hasTenantCtx
+          ? artifactStagingMap.get(stagingMapKey(runCtx.companyId!, runCtx.agentId!, artifactId))
+          : undefined;
         if (!stagingEntry) {
           ctx.logger.warn("cad:export: unknown artifactId", { artifactId });
           const ms = Date.now() - t0;

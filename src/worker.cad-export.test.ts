@@ -28,6 +28,16 @@ vi.mock("@paperclipai/plugin-sdk", () => ({
 
 type ToolHandler = (params: unknown, runCtx?: unknown) => Promise<unknown>;
 
+// PLA-80 (F6): default tenant identity used by every test that doesn't
+// intentionally exercise cross-tenant isolation. Real `ToolRunContext` shape
+// (companyId, agentId, runId, projectId) — see plugin-sdk types.ts.
+const DEFAULT_RUN_CTX = {
+  companyId: "company-A",
+  agentId: "agent-A",
+  runId: "run-A",
+  projectId: "project-A",
+};
+
 function buildMockCtx(
   pat = "ghp_fake_token_pla56",
   config: Record<string, unknown> = { githubPatSecretId: "secret-uuid-pla56" },
@@ -74,11 +84,22 @@ afterAll(() => {
 const BOX_SCRIPT = "import cadquery as cq\nresult = cq.Workplane('XY').box(1, 1, 1)";
 
 // Helper: stage an artifact via cad:run_script.
-async function stageArtifact(script = BOX_SCRIPT): Promise<string> {
-  const r = (await cadRunScript({ script })) as { data?: { artifactId?: string } };
+async function stageArtifact(
+  script = BOX_SCRIPT,
+  runCtx: Record<string, string> = DEFAULT_RUN_CTX,
+): Promise<string> {
+  const r = (await cadRunScript({ script }, runCtx)) as { data?: { artifactId?: string } };
   const id = r.data?.artifactId;
   if (!id) throw new Error("cad:run_script did not return artifactId");
   return id;
+}
+
+// Helper: invoke cad:export with a tenant-scoped runCtx.
+async function exportArtifact(
+  params: Record<string, unknown>,
+  runCtx: Record<string, string> = DEFAULT_RUN_CTX,
+): Promise<unknown> {
+  return cadExport(params, runCtx);
 }
 
 // Mock helpers for the GitHub call sequence in cad:export:
@@ -112,7 +133,7 @@ describe("cad:export PLA-56 pipeline", () => {
     fetchMock.mockReset();
     fetchMock.mockResolvedValueOnce({ ok: false, status: 404, json: async () => ({}), text: async () => "" } as Response);
 
-    const result = (await cadExport({ ...BASE_PARAMS, artifactId })) as { data?: { error?: string; message?: string } };
+    const result = (await exportArtifact({ ...BASE_PARAMS, artifactId })) as { data?: { error?: string; message?: string } };
     expect(result.data?.error).toBe("prerequisite_missing");
     expect(result.data?.message).toMatch(/404/);
     expect(result.data?.message).toMatch(/operator/i);
@@ -124,7 +145,7 @@ describe("cad:export PLA-56 pipeline", () => {
     fetchMock.mockReset();
     fetchMock.mockResolvedValueOnce({ ok: false, status: 403, json: async () => ({}), text: async () => "" } as Response);
 
-    const result = (await cadExport({ ...BASE_PARAMS, artifactId })) as { data?: { error?: string } };
+    const result = (await exportArtifact({ ...BASE_PARAMS, artifactId })) as { data?: { error?: string } };
     expect(result.data?.error).toBe("prerequisite_missing");
   });
 
@@ -137,7 +158,7 @@ describe("cad:export PLA-56 pipeline", () => {
     fetchMock.mockResolvedValueOnce(ok200({ sha: "blobsha123", html_url: "https://github.com/o/r/blob/main/path" })); // 2. idempotency → exists
     fetchMock.mockResolvedValueOnce(ok200([{ sha: "commitsha456" }]));           // 3. commits?path=...
 
-    const result = (await cadExport({ ...BASE_PARAMS, artifactId })) as {
+    const result = (await exportArtifact({ ...BASE_PARAMS, artifactId })) as {
       data?: { commitSha?: string; permalink?: string; artifactPath?: string; error?: string };
     };
     expect(result.data?.error).toBeUndefined();
@@ -159,7 +180,7 @@ describe("cad:export PLA-56 pipeline", () => {
     fetchMock.mockResolvedValueOnce(notFound()); // 3. push GET → 404 (new file)
     fetchMock.mockResolvedValueOnce(putOk("deadbeef1234")); // 4. PUT
 
-    const result = (await cadExport({ ...BASE_PARAMS, artifactId })) as {
+    const result = (await exportArtifact({ ...BASE_PARAMS, artifactId })) as {
       data?: { commitSha?: string; permalink?: string; artifactPath?: string; error?: string };
     };
     expect(result.data?.error).toBeUndefined();
@@ -178,7 +199,7 @@ describe("cad:export PLA-56 pipeline", () => {
     fetchMock.mockResolvedValueOnce(notFound());
     fetchMock.mockResolvedValueOnce(putOk("sha9999"));
 
-    const result = await cadExport({ ...BASE_PARAMS, artifactId });
+    const result = await exportArtifact({ ...BASE_PARAMS, artifactId });
     expect(JSON.stringify(result)).not.toContain("ghp_fake_token_pla56");
   });
 
@@ -191,7 +212,7 @@ describe("cad:export PLA-56 pipeline", () => {
     fetchMock.mockResolvedValueOnce(notFound());
     fetchMock.mockResolvedValueOnce(putOk("sha-msg-test"));
 
-    await cadExport({ artifactId, format: "step", paperclipTicketId: "PLA-999", toolCallId: "tc-abc123" });
+    await exportArtifact({ artifactId, format: "step", paperclipTicketId: "PLA-999", toolCallId: "tc-abc123" });
 
     const putCall = fetchMock.mock.calls.find((c) => (c[1] as RequestInit | undefined)?.method === "PUT");
     const body = JSON.parse((putCall![1] as RequestInit).body as string) as { message?: string };
@@ -208,7 +229,7 @@ describe("cad:export PLA-56 pipeline", () => {
     fetchMock.mockResolvedValueOnce(notFound());
     fetchMock.mockResolvedValueOnce(putOk("final-sha"));
 
-    const result = (await cadExport({ ...BASE_PARAMS, artifactId })) as { data?: Record<string, unknown> };
+    const result = (await exportArtifact({ ...BASE_PARAMS, artifactId })) as { data?: Record<string, unknown> };
     expect(Object.keys(result.data!).sort()).toEqual(["artifactPath", "commitSha", "permalink"]);
   });
 
@@ -221,7 +242,7 @@ describe("cad:export PLA-56 pipeline", () => {
     fetchMock.mockResolvedValueOnce(notFound());
     fetchMock.mockResolvedValueOnce({ ok: false, status: 403, json: async () => ({}), text: async () => "" } as Response);
 
-    const result = (await cadExport({ ...BASE_PARAMS, artifactId })) as { data?: { error?: string } };
+    const result = (await exportArtifact({ ...BASE_PARAMS, artifactId })) as { data?: { error?: string } };
     expect(result.data?.error).toBe("auth");
   });
 
@@ -234,7 +255,7 @@ describe("cad:export PLA-56 pipeline", () => {
     fetchMock.mockResolvedValueOnce(notFound());
     fetchMock.mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({}), text: async () => "unavailable" } as Response);
 
-    const result = (await cadExport({ ...BASE_PARAMS, artifactId })) as { data?: { error?: string } };
+    const result = (await exportArtifact({ ...BASE_PARAMS, artifactId })) as { data?: { error?: string } };
     expect(result.data?.error).toBe("network");
   });
 
@@ -250,7 +271,7 @@ describe("cad:export PLA-56 pipeline", () => {
     fetchMock.mockResolvedValueOnce(ok200({ sha: "existingsha" })); // push attempt 2: GET → sha
     fetchMock.mockResolvedValueOnce(putOk("retrysha789")); // PUT → success
 
-    const result = (await cadExport({ ...BASE_PARAMS, artifactId })) as { data?: { commitSha?: string; error?: string } };
+    const result = (await exportArtifact({ ...BASE_PARAMS, artifactId })) as { data?: { commitSha?: string; error?: string } };
     expect(result.data?.error).toBeUndefined();
     expect(result.data?.commitSha).toBe("retrysha789");
   });
@@ -267,7 +288,7 @@ describe("cad:export PLA-56 pipeline", () => {
     fetchMock.mockResolvedValueOnce(notFound());
     fetchMock.mockResolvedValueOnce({ ok: false, status: 409, json: async () => ({}), text: async () => "conflict" } as Response);
 
-    const result = (await cadExport({ ...BASE_PARAMS, artifactId })) as { data?: { error?: string } };
+    const result = (await exportArtifact({ ...BASE_PARAMS, artifactId })) as { data?: { error?: string } };
     expect(result.data?.error).toBe("conflict");
   });
 
@@ -281,7 +302,7 @@ describe("cad:export PLA-56 pipeline", () => {
     const plugin2 = (await import("./worker.js")) as { default?: { setup?: (ctx: unknown) => Promise<void> } };
     await plugin2.default?.setup?.(customCtx);
 
-    const runResult = (await handlers["cad:run_script"]({ script: "x=1" })) as { data?: { artifactId?: string } };
+    const runResult = (await handlers["cad:run_script"]({ script: "x=1" }, DEFAULT_RUN_CTX)) as { data?: { artifactId?: string } };
     const artifactId = runResult.data?.artifactId!;
 
     const fetchMock = vi.mocked(globalThis.fetch);
@@ -291,7 +312,7 @@ describe("cad:export PLA-56 pipeline", () => {
     fetchMock.mockResolvedValueOnce(notFound());
     fetchMock.mockResolvedValueOnce(putOk("sha-custom"));
 
-    await handlers["cad:export"]({ ...BASE_PARAMS, artifactId });
+    await handlers["cad:export"]({ ...BASE_PARAMS, artifactId }, DEFAULT_RUN_CTX);
 
     const allUrls = fetchMock.mock.calls.map((c) =>
       typeof c[0] === "string" ? c[0] : (c[0] as Request).url,
@@ -310,7 +331,7 @@ describe("cad:export PLA-56 pipeline", () => {
     fetchMock.mockResolvedValueOnce(notFound());
     fetchMock.mockResolvedValueOnce(putOk("pathtest-sha"));
 
-    const result = (await cadExport({
+    const result = (await exportArtifact({
       artifactId, format: "stl" as const,
       paperclipTicketId: "PLA-42", toolCallId: "tc-xyz", filename: "part.stl",
     })) as { data?: { artifactPath?: string } };
@@ -318,5 +339,89 @@ describe("cad:export PLA-56 pipeline", () => {
 
     const putCall = fetchMock.mock.calls.find((c) => (c[1] as RequestInit | undefined)?.method === "PUT");
     expect(typeof putCall![0] === "string" ? putCall![0] : "").toContain("artifacts/PLA-42/tc-xyz/part.stl");
+  });
+
+  // -------------------------------------------------------------------------
+  // PLA-80 (F6): tenant-scoped staging map regression tests.
+  //
+  // The CAD plugin worker process is shared across all agents and companies on
+  // a host. The staging map must be keyed by (companyId, agentId, artifactId)
+  // sourced from the runCtx so a leaked artifactId is not enough to read back
+  // another tenant's staged artifact.
+  // -------------------------------------------------------------------------
+
+  it("F6: agent A stages and reads back its own artifact (sanity)", async () => {
+    const ctxA = { companyId: "co-A", agentId: "agent-A", runId: "r-1", projectId: "p-A" };
+    const artifactId = await stageArtifact(BOX_SCRIPT, ctxA);
+
+    const fetchMock = vi.mocked(globalThis.fetch);
+    fetchMock.mockReset();
+    // Local-file path (no GitHub params) — tests the staging-map lookup only.
+    const result = (await exportArtifact({ artifactId, format: "step" as const }, ctxA)) as {
+      data?: { filePath?: string; error?: string; code?: string };
+    };
+    expect(result.data?.error).toBeUndefined();
+    expect(result.data?.code).toBeUndefined();
+    expect(result.data?.filePath).toBeDefined();
+  });
+
+  it("F6: agent B (same companyId, different agentId) cannot read agent A's artifact", async () => {
+    const ctxA = { companyId: "co-shared", agentId: "agent-A", runId: "r-A", projectId: "p" };
+    const ctxB = { companyId: "co-shared", agentId: "agent-B", runId: "r-B", projectId: "p" };
+    const artifactId = await stageArtifact(BOX_SCRIPT, ctxA);
+
+    const fetchMock = vi.mocked(globalThis.fetch);
+    fetchMock.mockReset();
+    const result = (await exportArtifact({ artifactId, format: "step" as const }, ctxB)) as {
+      data?: { code?: string; statusCode?: number; message?: string };
+    };
+    // Same response shape as a genuinely missing artifactId — no oracle.
+    expect(result.data?.code).toBe("worker_internal");
+    expect(result.data?.statusCode).toBe(500);
+    expect(result.data?.message).toMatch(/No staged artifact/);
+    // No GitHub calls should have been issued — the lookup short-circuits.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("F6: agent in different companyId cannot read agent A's artifact", async () => {
+    const ctxA = { companyId: "co-X", agentId: "agent-X", runId: "r-X", projectId: "p" };
+    const ctxOtherCo = { companyId: "co-Y", agentId: "agent-X", runId: "r-Y", projectId: "p" };
+    const artifactId = await stageArtifact(BOX_SCRIPT, ctxA);
+
+    const fetchMock = vi.mocked(globalThis.fetch);
+    fetchMock.mockReset();
+    const result = (await exportArtifact({ artifactId, format: "step" as const }, ctxOtherCo)) as {
+      data?: { code?: string; statusCode?: number; message?: string };
+    };
+    expect(result.data?.code).toBe("worker_internal");
+    expect(result.data?.statusCode).toBe(500);
+    expect(result.data?.message).toMatch(/No staged artifact/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("F6: cad:run_script rejects when runCtx is missing tenant context", async () => {
+    const result = (await cadRunScript({ script: BOX_SCRIPT }, {})) as {
+      error?: string;
+      data?: { code?: string };
+    };
+    expect(result.error).toBe("validation_error");
+    expect(result.data?.code).toBe("validation_error");
+  });
+
+  it("F6: cad:export with missing tenant runCtx is treated as not-found (no oracle)", async () => {
+    // First, stage as agent A.
+    const ctxA = { companyId: "co-A", agentId: "agent-A", runId: "r-A", projectId: "p" };
+    const artifactId = await stageArtifact(BOX_SCRIPT, ctxA);
+
+    const fetchMock = vi.mocked(globalThis.fetch);
+    fetchMock.mockReset();
+    // Now call cad:export with empty runCtx — must look exactly like missing.
+    const result = (await cadExport({ artifactId, format: "step" as const }, {})) as {
+      data?: { code?: string; statusCode?: number; message?: string };
+    };
+    expect(result.data?.code).toBe("worker_internal");
+    expect(result.data?.statusCode).toBe(500);
+    expect(result.data?.message).toMatch(/No staged artifact/);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
