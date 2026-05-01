@@ -8,15 +8,16 @@ const manifest: PaperclipPluginManifestV1 = {
   description:
     "Lets agents design and export 3D CAD models via CadQuery tool calls. " +
     "v0.1.0 surface: cad:run_script (execute Python → staged artifact) and " +
-    "cad:export (staged artifact → local file). Operator-confirmed via approval f420bc31.",
+    "cad:export (staged artifact → GitHub commit + permalink). " +
+    "Operator-confirmed via approval f420bc31.",
   author: "Platform",
   categories: ["connector"],
 
   // Capabilities (v0.1.0):
   //   agent.tools.register — register cad:run_script and cad:export
-  //   http.outbound        — reserved; real CadQuery worker (sub-goal 2)
-  //   secrets.read-ref     — reserved; future worker auth flows (sub-goal 2)
-  //   metrics.write        — ctx.metrics counters + duration histograms (AC3)
+  //   http.outbound        — GitHub Contents API push (PLA-56)
+  //   secrets.read-ref     — ctx.secrets.resolve for GitHub PAT (PLA-47)
+  //   metrics.write        — ctx.metrics counters + duration histograms
   capabilities: [
     "agent.tools.register",
     "http.outbound",
@@ -28,9 +29,34 @@ const manifest: PaperclipPluginManifestV1 = {
     worker: "./dist/worker.js",
   },
 
+  // instanceConfigSchema — ties secret-scope strictly to githubPatSecretId
+  // (PLA-41 remediation #2). Fields validated by the host before plugin load.
+  instanceConfigSchema: {
+    type: "object",
+    properties: {
+      githubPatSecretId: {
+        type: "string",
+        format: "secret-ref",
+        description:
+          "Paperclip secret UUID for the GitHub PAT used to push CAD artifacts. " +
+          "Create the secret in the board UI and paste its UUID here.",
+      },
+      artifactRepoUrl: {
+        type: "string",
+        description:
+          "HTTPS clone URL of the GitHub repository where CAD artifacts are stored. " +
+          "Defaults to https://github.com/claudegoogl-sudo/cad-artifacts.git. " +
+          "Operator must pre-create this repo; the plugin is push-only (PLA-56 AC#2).",
+      },
+      artifactRepoBranch: {
+        type: "string",
+        description: "Branch to commit artifacts to. Defaults to 'main'.",
+      },
+    },
+    required: ["githubPatSecretId"],
+  },
+
   // v0.1.0 tool surface — operator-confirmed via approval f420bc31 (2026-05-01).
-  // cad:hello (PLA-39 scaffold stub) intentionally removed here (AC7).
-  // cad_render / cad_commit / cad_export (intermediate work) also removed.
   tools: [
     {
       name: "cad:run_script",
@@ -38,7 +64,7 @@ const manifest: PaperclipPluginManifestV1 = {
       description:
         "Execute a CadQuery Python script string. " +
         "Returns { artifactId, summary }. The artifact is staged locally; " +
-        "use cad:export to retrieve it in a specific file format.",
+        "use cad:export to commit it to the GitHub artifact repo.",
       parametersSchema: {
         type: "object",
         properties: {
@@ -64,9 +90,11 @@ const manifest: PaperclipPluginManifestV1 = {
       name: "cad:export",
       displayName: "CAD Export",
       description:
-        "Export a previously staged CAD artifact to a specific file format. " +
-        "Returns { filePath } within the plugin artifact-staging area. " +
-        "NOT a URL — sub-goal 5 wires the artifact-persistence pipeline.",
+        "Export a previously staged CAD artifact to a specific file format and " +
+        "commit it to the configured GitHub artifact repository. " +
+        "Artifact path is deterministic: artifacts/{paperclipTicketId}/{toolCallId}/{filename}. " +
+        "Idempotent: re-calling with the same toolCallId returns the existing commit info. " +
+        "Returns { commitSha, permalink, artifactPath } on success.",
       parametersSchema: {
         type: "object",
         properties: {
@@ -79,9 +107,23 @@ const manifest: PaperclipPluginManifestV1 = {
             enum: ["step", "stl", "3mf"],
             description: "Output file format.",
           },
+          paperclipTicketId: {
+            type: "string",
+            description:
+              "Paperclip ticket ID (e.g. PLA-56). Used in artifact path and commit message.",
+          },
+          toolCallId: {
+            type: "string",
+            description:
+              "Unique ID for this tool call. Used for deterministic artifact path and idempotency.",
+          },
+          filename: {
+            type: "string",
+            description:
+              "Optional artifact filename. Defaults to 'artifact.<format>'.",
+          },
         },
-        required: ["artifactId", "format"],
-        additionalProperties: false,
+        required: ["artifactId", "format", "paperclipTicketId", "toolCallId"],
       },
     },
   ],
