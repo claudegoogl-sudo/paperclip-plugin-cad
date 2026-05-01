@@ -171,7 +171,7 @@ describe("AC4 — filesystem isolation", () => {
 // ---------------------------------------------------------------------------
 
 describe("AC6 — network restriction", () => {
-  it("urllib.request.urlopen fails with script_error containing 'network access blocked'", async () => {
+  it("urllib.request.urlopen fails with script_error (AC6: network blocked)", async () => {
     const workdir = await freshWorkdir();
     const script =
       "import urllib.request\n" +
@@ -186,11 +186,13 @@ describe("AC6 — network restriction", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error).toBe("script_error");
-      expect(result.message).toMatch(/network access blocked/i);
+      // PLA-54: stub raises "network access blocked"; PLA-76: _restricted_import
+      // raises "import blocked" — both indicate the sandbox is working.
+      expect(result.message).toMatch(/network access blocked|import blocked|\[cad-worker\]/i);
     }
   }, T);
 
-  it("socket.create_connection fails with script_error containing 'network access blocked'", async () => {
+  it("socket.create_connection fails with script_error (AC6: network blocked)", async () => {
     const workdir = await freshWorkdir();
     const script =
       "import socket\n" +
@@ -205,7 +207,9 @@ describe("AC6 — network restriction", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error).toBe("script_error");
-      expect(result.message).toMatch(/network access blocked/i);
+      // PLA-54: stub raises "network access blocked"; PLA-76: _restricted_import
+      // raises "import blocked" — both indicate the sandbox is working.
+      expect(result.message).toMatch(/network access blocked|import blocked|\[cad-worker\]/i);
     }
   }, T);
 });
@@ -283,6 +287,132 @@ describe("renderCadQuery — end-to-end integration", () => {
     expect(MAX_TIMEOUT_SECONDS).toBeLessThanOrEqual(300);
     expect(DEFAULT_TIMEOUT_SECONDS).toBeLessThanOrEqual(MAX_TIMEOUT_SECONDS);
   });
+});
+
+// ---------------------------------------------------------------------------
+// PLA-76 — sandbox hardening regression tests
+// Each test must fail against the pre-PLA-76 worker and pass after the fix.
+// ---------------------------------------------------------------------------
+
+describe("PLA-76 — sandbox hardening", () => {
+  it("subprocess.run(['id']) → script_error (CRITICAL-1: subprocess blocked)", async () => {
+    const workdir = await freshWorkdir();
+    const script =
+      "import subprocess\n" +
+      "subprocess.run(['id'])\n" +
+      "result = None";
+
+    const result = await invokeWorker(
+      { script, format: "step", workdir },
+      DEFAULT_TIMEOUT_SECONDS,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("script_error");
+    }
+  }, T);
+
+  it("ctypes.CDLL('libc.so.6') → script_error (CRITICAL-2: ctypes blocked)", async () => {
+    const workdir = await freshWorkdir();
+    const script =
+      "import ctypes\n" +
+      "ctypes.CDLL('libc.so.6')\n" +
+      "result = None";
+
+    const result = await invokeWorker(
+      { script, format: "step", workdir },
+      DEFAULT_TIMEOUT_SECONDS,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("script_error");
+    }
+  }, T);
+
+  it("del sys.modules + reimport socket → script_error (CRITICAL-3: meta_path bypass blocked)", async () => {
+    const workdir = await freshWorkdir();
+    const script =
+      "import sys\n" +
+      "del sys.modules['socket']\n" +
+      "import socket\n" +
+      "result = None";
+
+    const result = await invokeWorker(
+      { script, format: "step", workdir },
+      DEFAULT_TIMEOUT_SECONDS,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("script_error");
+    }
+  }, T);
+
+  it("importlib.util.spec_from_file_location → script_error (HIGH-1: importlib blocked)", async () => {
+    const workdir = await freshWorkdir();
+    // importlib.util is blocked; the import itself should raise before any .so
+    // is reached.
+    const script = [
+      "import importlib.util, glob",
+      "hits = (glob.glob('/usr/lib/python*/_socket*.so')",
+      "       + glob.glob('/usr/lib/python*/lib-dynload/_socket*.so'))",
+      "if hits:",
+      "    spec = importlib.util.spec_from_file_location('_sock_bypass', hits[0])",
+      "result = None",
+    ].join("\n");
+
+    const result = await invokeWorker(
+      { script, format: "step", workdir },
+      DEFAULT_TIMEOUT_SECONDS,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("script_error");
+    }
+  }, T);
+
+  it("open('/tmp/abs-path-write', 'w') → script_error (HIGH-2: path-escape blocked)", async () => {
+    const workdir = await freshWorkdir();
+    const script =
+      "open('/tmp/abs-path-write', 'w').write('escaped')\n" +
+      "result = None";
+
+    const result = await invokeWorker(
+      { script, format: "step", workdir },
+      DEFAULT_TIMEOUT_SECONDS,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("script_error");
+    }
+  }, T);
+
+  it("allocating >2 GB → worker_oom or process terminated (MEDIUM-1: RLIMIT_AS)", async () => {
+    const workdir = await freshWorkdir();
+    // 3 GiB allocation should exceed the 2 GiB RLIMIT_AS ceiling.
+    const script =
+      "x = bytearray(3 * 1024 ** 3)\n" +
+      "result = None";
+
+    const result = await invokeWorker(
+      { script, format: "step", workdir },
+      DEFAULT_TIMEOUT_SECONDS,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      // worker_oom  — MemoryError caught in the sandbox.
+      // worker_internal — process killed by OOM killer before stdout was written.
+      // worker_timeout  — defensive fallback on very large-memory hosts.
+      expect(["worker_oom", "worker_internal", "worker_timeout"]).toContain(
+        result.error,
+      );
+    }
+  }, T);
 });
 
 // ---------------------------------------------------------------------------

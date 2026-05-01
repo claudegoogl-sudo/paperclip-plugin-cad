@@ -57,6 +57,7 @@ Dependency pinning (AC5):
     Full exact pin list lives in worker/requirements-cad.txt.
 """
 
+import builtins as _builtins
 import json
 import os
 import sys
@@ -64,6 +65,9 @@ import tempfile
 import traceback
 from types import ModuleType
 from typing import Any
+
+# Capture the real __import__ at module-load time, before any restrictions.
+_REAL_IMPORT = _builtins.__import__
 
 # ---------------------------------------------------------------------------
 # Network restriction — library-restriction-based (PLA-54 AC6)
@@ -107,6 +111,35 @@ _BLOCKED_MODULES: list[str] = [
     "requests",        # third-party HTTP library
     "httpx",           # third-party async HTTP client
     "aiohttp",         # third-party async HTTP client
+
+    # ---- Process / OS escape vectors (PLA-76 CRITICAL-1, CRITICAL-2, HIGH-1) ----
+    "subprocess",           # CRITICAL-1: arbitrary command execution
+    "ctypes",               # CRITICAL-2: native library / raw syscall access
+    "ctypes.util",          # CRITICAL-2: ctypes helper
+    "importlib",            # HIGH-1: dynamic module loading bypass
+    "importlib.util",       # HIGH-1
+    "importlib.machinery",  # HIGH-1
+    "multiprocessing",      # process spawning (belt-and-suspenders with subprocess)
+    "threading",            # long-running thread escape from sandbox lifetime
+]
+
+# Frozenset for O(1) lookup in _restricted_import and _BlockingMetaPathFinder.
+_BLOCKED_MODULES_SET: frozenset[str] = frozenset(_BLOCKED_MODULES)
+
+# Subset that is safe to replace with stubs in sys.modules without breaking
+# Python or CadQuery internals.
+#
+# importlib / importlib.util / importlib.machinery are EXCLUDED from sys.modules
+# stubs because CadQuery's __init__.py does `from importlib.metadata import …`
+# lazily during user-script execution; stubbing importlib breaks that import.
+# _restricted_import and _BlockingMetaPathFinder still block user-script imports.
+#
+# threading is EXCLUDED because Python's runtime needs sys.modules['threading']
+# for cleanup (__del__, atexit hooks).  User-script imports are still blocked by
+# _restricted_import.
+_SYS_MODULES_STUBS: list[str] = [
+    m for m in _BLOCKED_MODULES
+    if not (m == "threading" or m.startswith("importlib"))
 ]
 
 
@@ -147,7 +180,7 @@ class _NetworkBlockedModule(ModuleType):
 
 def _install_network_block() -> None:
     """
-    Replace all network-capable modules in sys.modules with blockers.
+    Replace all blocked modules in sys.modules with stubs.
 
     Called once, immediately before exec()ing user code.
     Already-imported native extension modules (e.g. _ssl) are replaced too
@@ -156,8 +189,98 @@ def _install_network_block() -> None:
     imported the module before this function ran, which we prevent by calling
     this before exec().
     """
-    for mod_name in _BLOCKED_MODULES:
+    for mod_name in _SYS_MODULES_STUBS:
         sys.modules[mod_name] = _NetworkBlockedModule(mod_name)
+
+
+# ---------------------------------------------------------------------------
+# Restricted import / open helpers (PLA-76 CRITICAL-3, HIGH-1, HIGH-2)
+# ---------------------------------------------------------------------------
+
+def _restricted_import(
+    name: str,
+    globals: Any = None,  # noqa: A002
+    locals: Any = None,   # noqa: A002
+    fromlist: tuple = (),
+    level: int = 0,
+) -> Any:
+    """
+    Drop-in replacement for ``__import__`` injected into the exec namespace.
+
+    Raises ImportError for any module in _BLOCKED_MODULES_SET, including
+    sub-module paths whose root is blocked (e.g. "ctypes.util" -> "ctypes").
+    Falls through to the real ``__import__`` for everything else.
+    """
+    top = name.split(".")[0]
+    if name in _BLOCKED_MODULES_SET or top in _BLOCKED_MODULES_SET:
+        raise ImportError(
+            f"[cad-worker] Import blocked: '{name}' is not allowed "
+            f"inside the CadQuery sandbox."
+        )
+    return _REAL_IMPORT(name, globals, locals, fromlist, level)
+
+
+def _restricted_open(workdir: str):
+    """
+    Return a restricted ``open`` callable that only permits access inside
+    *workdir*.  Resolves symlinks before comparing paths.
+
+    File-descriptor integers are passed through unchanged (needed by Python
+    internals).  Paths outside the sandbox raise PermissionError.
+    """
+    _real_open = _builtins.open
+    _realpath_workdir = os.path.realpath(workdir)
+
+    def _open(file: Any, *args: Any, **kwargs: Any) -> Any:
+        if not isinstance(file, int):
+            realpath = os.path.realpath(str(file))
+            inside = (
+                realpath == _realpath_workdir
+                or realpath.startswith(_realpath_workdir + os.sep)
+            )
+            if not inside:
+                raise PermissionError(
+                    f"[cad-worker] File access blocked: '{file}' resolves to "
+                    f"'{realpath}' which is outside the sandbox workdir "
+                    f"'{_realpath_workdir}'."
+                )
+        return _real_open(file, *args, **kwargs)
+
+    return _open
+
+
+# ---------------------------------------------------------------------------
+# sys.meta_path blocker (PLA-76 CRITICAL-3 — del sys.modules bypass)
+# ---------------------------------------------------------------------------
+
+class _BlockingMetaPathFinder:
+    """
+    sys.meta_path hook installed before exec() to intercept find_spec calls.
+
+    Raises ImportError for any blocked module even if the caller has
+    deleted the sys.modules stub and is using the real ``__import__``
+    (e.g. via ``builtins.__import__``).  This closes the
+    ``del sys.modules[name]; import name`` reimport bypass (CRITICAL-3).
+    """
+
+    def find_spec(self, fullname: str, path: Any, target: Any = None) -> None:  # type: ignore[return]
+        # Use EXACT matching only (not root-prefix).  Root-prefix matching would
+        # also block importlib.metadata, importlib.resources, etc. which are
+        # legitimate stdlib modules needed by CadQuery internals.  The precise
+        # entries in _BLOCKED_MODULES_SET (importlib.util, importlib.machinery)
+        # are the dangerous ones; importlib.metadata is intentionally not listed.
+        if fullname in _BLOCKED_MODULES_SET:
+            raise ImportError(
+                f"[cad-worker] Import blocked: '{fullname}' is not allowed "
+                f"inside the CadQuery sandbox."
+            )
+        return None  # not handled here; let other finders proceed
+
+
+def _install_meta_path_blocker() -> None:
+    """Insert _BlockingMetaPathFinder at the front of sys.meta_path (idempotent)."""
+    if not any(isinstance(f, _BlockingMetaPathFinder) for f in sys.meta_path):
+        sys.meta_path.insert(0, _BlockingMetaPathFinder())
 
 
 # ---------------------------------------------------------------------------
@@ -184,11 +307,36 @@ def _run_script(script: str, fmt: str, workdir: str) -> dict:
             "message": f"Could not chdir to workdir {workdir!r}: {exc}",
         }
 
-    # Install network blocker BEFORE exec()ing any user code.
+    # Set virtual-address-space ceiling before user code runs (PLA-76 MEDIUM-1).
+    # Note: RLIMIT_AS caps total virtual memory of this process.  CadQuery with
+    # OpenCASCADE can map significant virtual address space; if this limit is too
+    # tight for a given deployment, raise it here.
+    try:
+        import resource  # noqa: PLC0415
+        _MEM_LIMIT = 2 * 1024 ** 3  # 2 GiB virtual address space
+        resource.setrlimit(resource.RLIMIT_AS, (_MEM_LIMIT, _MEM_LIMIT))
+    except Exception:  # noqa: BLE001
+        pass  # RLIMIT_AS not available on this platform (e.g. macOS)
+
+    # Install meta_path blocker BEFORE network block so all subsequent import
+    # attempts (including bypass via real __import__) are intercepted.
+    _install_meta_path_blocker()
+
+    # Install module stubs in sys.modules (network + process-escape modules).
     _install_network_block()
 
-    # Execute the user script in an isolated namespace.
-    ns: dict = {}
+    # Build restricted __builtins__ for the exec namespace (PLA-76 CRITICAL-3).
+    # Removes eval/exec/compile/breakpoint/input, replaces __import__ with
+    # _restricted_import (enforces _BLOCKED_MODULES_SET) and open with
+    # _restricted_open (enforces workdir confinement).
+    _restricted_builtins: dict = dict(vars(_builtins))
+    for _dangerous_name in ("eval", "exec", "compile", "breakpoint", "input"):
+        _restricted_builtins.pop(_dangerous_name, None)
+    _restricted_builtins["__import__"] = _restricted_import
+    _restricted_builtins["open"] = _restricted_open(os.path.realpath(workdir))
+
+    # Execute the user script in a namespace with restricted builtins.
+    ns: dict = {"__builtins__": _restricted_builtins}
     try:
         exec(compile(script, "<cad_script>", "exec"), ns)  # noqa: S102
     except MemoryError:
