@@ -101,6 +101,18 @@ var plugin = definePlugin({
       },
       async (params) => {
         const { artifactPath, repoPath, commitMessage } = params;
+        const { resolve } = await import("node:path");
+        const { tmpdir } = await import("node:os");
+        const resolvedArtifactPath = resolve(artifactPath);
+        const allowedPrefix = tmpdir();
+        if (!resolvedArtifactPath.startsWith(allowedPrefix + "/")) {
+          ctx.logger.warn("cad_commit: rejected out-of-bounds artifactPath", {
+            resolvedArtifactPath
+          });
+          return {
+            data: { error: "artifactPath must be within the temp directory." }
+          };
+        }
         const config = await ctx.config.get();
         if (!config.githubPatSecretId) {
           return {
@@ -116,7 +128,7 @@ var plugin = definePlugin({
         const commitSha = await pushArtifactToGitHub(
           pat,
           repoUrl,
-          artifactPath,
+          resolvedArtifactPath,
           repoPath,
           commitMessage
         );
