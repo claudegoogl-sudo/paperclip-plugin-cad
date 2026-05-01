@@ -4,26 +4,14 @@ var manifest = {
   apiVersion: 1,
   version: "0.1.0",
   displayName: "CAD (CadQuery)",
-  // Purpose: enable agents to design and export 3D CAD models programmatically
-  // using CadQuery (Python), then commit the resulting artifacts (STEP/STL) to
-  // a project GitHub repository in a single, auditable workflow.
-  //
-  // Scope (v0.1.0): two production tools (cad_render, cad_commit) plus a
-  // stub verification tool (cad:hello). Full CadQuery subprocess sandboxing,
-  // configurable repo URL, and additional export targets are out of scope for
-  // v0.1.0 — see CHANGELOG.md for known limitations.
-  description: "Lets agents design and render 3D CAD models via CadQuery tool calls, and commit the resulting artifacts to a project GitHub repository. v0.1.0 scope: cad_render (script to artifact path) and cad_commit (artifact path to GitHub commit). See SKILL.md for invocation schemas.",
+  description: "Lets agents design and render 3D CAD models via CadQuery tool calls, and commit the resulting artifacts to a project GitHub repository.",
   author: "Platform",
   categories: ["connector"],
-  // Capability rationale:
-  //   secrets.read-ref     -- resolve the GitHub PAT from the Paperclip secrets
-  //                          store on each cad_commit call (no caching).
-  //   agent.tools.register -- register cad_render, cad_commit, and cad:hello on
-  //                          every agent this plugin is enabled for.
-  //   http.outbound        -- push rendered artifacts to the GitHub Contents API
-  //                          (api.github.com). No other outbound targets used.
-  //   metrics.write        -- emit tool-call counters and latency via
-  //                          ctx.metrics.write for observability.
+  // Capabilities required by this plugin:
+  //   secrets.read-ref       — ctx.secrets.resolve for GitHub PAT
+  //   agent.tools.register   — register CAD tool handlers for agents
+  //   http.outbound          — CAD worker subprocess + git push to GitHub
+  //   metrics.write          — push error/success counters (PLA-56 observability)
   capabilities: [
     "secrets.read-ref",
     "agent.tools.register",
@@ -36,7 +24,7 @@ var manifest = {
   // instanceConfigSchema ties secret-scope strictly to githubPatSecretId.
   // Without this the host uses a wider heuristic ("any UUID in config is
   // resolvable"). Declaring it here means only the field below is eligible
-  // for ctx.secrets.resolve calls.  -- PLA-41 remediation #2
+  // for ctx.secrets.resolve calls.  — PLA-41 remediation #2
   instanceConfigSchema: {
     type: "object",
     properties: {
@@ -44,31 +32,23 @@ var manifest = {
         type: "string",
         format: "secret-ref",
         description: "Paperclip secret UUID for the GitHub PAT used to push CAD artifacts. Create the secret in the board UI and paste its UUID here."
+      },
+      artifactRepoUrl: {
+        type: "string",
+        description: "HTTPS clone URL of the GitHub repository where CAD artifacts are stored. Defaults to https://github.com/claudegoogl-sudo/cad-artifacts.git. Operator must pre-create this repo; the plugin is push-only (PLA-56 AC#2)."
+      },
+      artifactRepoBranch: {
+        type: "string",
+        description: "Branch to commit artifacts to. Defaults to 'main'."
       }
     },
     required: ["githubPatSecretId"]
   },
   tools: [
     {
-      name: "cad:hello",
-      displayName: "CAD Hello",
-      description: "Stub tool -- returns a canned OK response with no side effects. Used for end-to-end verification of the plugin tool dispatch path (PLA-53).",
-      parametersSchema: {
-        type: "object",
-        properties: {
-          name: {
-            type: "string",
-            description: "Optional greeting name. Defaults to 'world'."
-          }
-        },
-        required: [],
-        additionalProperties: false
-      }
-    },
-    {
       name: "cad_render",
       displayName: "CAD Render",
-      description: "Execute a CadQuery Python script and return the resulting 3D model as a STEP/STL artifact path. The script runs in an isolated subprocess.",
+      description: "Execute a CadQuery Python script and return the resulting 3D model as a STEP/STL artifact URL. The script runs in an isolated subprocess.",
       parametersSchema: {
         type: "object",
         properties: {
@@ -88,7 +68,7 @@ var manifest = {
     {
       name: "cad_commit",
       displayName: "CAD Commit Artifact",
-      description: "Commit a previously rendered CAD artifact to the project GitHub repository and return the commit SHA. artifactPath must be inside the system temp directory.",
+      description: "Commit a previously rendered CAD artifact to the project GitHub repository and return the commit URL.",
       parametersSchema: {
         type: "object",
         properties: {
@@ -106,6 +86,38 @@ var manifest = {
           }
         },
         required: ["artifactPath", "repoPath", "commitMessage"]
+      }
+    },
+    {
+      name: "cad_export",
+      displayName: "CAD Export & Commit",
+      description: "Render a CadQuery script and commit the artifact to the configured GitHub artifact repository in a single call. Artifact path is deterministic: artifacts/{paperclipTicketId}/{toolCallId}/{filename}. Idempotent: re-calling with the same toolCallId returns the existing commit info. Returns commitSha, permalink, and artifactPath on success.",
+      parametersSchema: {
+        type: "object",
+        properties: {
+          script: {
+            type: "string",
+            description: "CadQuery Python script to render."
+          },
+          format: {
+            type: "string",
+            enum: ["step", "stl"],
+            description: "Output file format. Defaults to 'step'."
+          },
+          paperclipTicketId: {
+            type: "string",
+            description: "Paperclip ticket ID (e.g. PLA-56). Used in the artifact path and commit message."
+          },
+          toolCallId: {
+            type: "string",
+            description: "Unique ID for this tool call. Used for deterministic artifact path and idempotency."
+          },
+          filename: {
+            type: "string",
+            description: "Optional artifact filename. Defaults to 'artifact.<format>'."
+          }
+        },
+        required: ["script", "paperclipTicketId", "toolCallId"]
       }
     }
   ]
