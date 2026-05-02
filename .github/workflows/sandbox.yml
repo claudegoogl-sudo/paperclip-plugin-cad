@@ -162,6 +162,45 @@ jobs:
           PREEXEC="$PWD/worker/cad_preexec"
           test -x "$PREEXEC" || { echo "missing $PREEXEC"; exit 2; }
           set +e
+
+          # ----- Phase A: bwrap-only (no seccomp), /bin/echo --------------
+          # Validates that bwrap+namespaces+ro-binds work on this runner,
+          # independent of seccomp. If this fails, the issue is bwrap/userns,
+          # not the filter blob.
+          echo "=== Phase A: bwrap-only smoke ==="
+          bwrap --unshare-all --die-with-parent --new-session --clearenv \
+            --setenv PATH /usr/bin:/bin \
+            --uid 65534 --gid 65534 --hostname cad-worker \
+            --proc /proc --dev /dev \
+            --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
+            --ro-bind /bin /bin --ro-bind /etc/ld.so.cache /etc/ld.so.cache \
+            --tmpfs /tmp --cap-drop ALL \
+            -- /bin/echo "phase-A: bwrap-only OK"
+          rcA=$?
+          echo "phase-A exit=$rcA"
+
+          # ----- Phase B: bwrap+seccomp, /bin/echo (no preexec) -----------
+          # Validates that the seccomp filter does not kill bwrap's launch
+          # execve into a static binary. If this fails with 159, the filter
+          # itself is denylisting execve and the design is broken on this
+          # runner; if it succeeds, the failure is downstream (cad_preexec or
+          # python startup).
+          echo "=== Phase B: bwrap+seccomp /bin/echo ==="
+          exec 4<worker/seccomp_filter.bpf
+          bwrap --unshare-all --die-with-parent --new-session --clearenv \
+            --setenv PATH /usr/bin:/bin \
+            --uid 65534 --gid 65534 --hostname cad-worker \
+            --proc /proc --dev /dev \
+            --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
+            --ro-bind /bin /bin --ro-bind /etc/ld.so.cache /etc/ld.so.cache \
+            --tmpfs /tmp --cap-drop ALL --seccomp 4 \
+            -- /bin/echo "phase-B: bwrap+seccomp OK"
+          rcB=$?
+          exec 4<&-
+          echo "phase-B exit=$rcB"
+
+          # ----- Phase C: full production argv ----------------------------
+          echo "=== Phase C: bwrap+seccomp+preexec+python ==="
           exec 3<worker/seccomp_filter.bpf
           bwrap \
             --unshare-all \
