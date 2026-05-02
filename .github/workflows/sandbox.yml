@@ -1,0 +1,84 @@
+name: Sandbox tests (bwrap + seccomp)
+
+# PLA-114 acceptance: "CI runs the bwrap test suite (does not skip)."
+#
+# This workflow installs bubblewrap + libseccomp-dev on a Linux runner,
+# builds the seccomp filter blob from worker/seccomp_filter.c, and runs
+# the bwrap integration matrix + perf gates. The matrix and perf gates
+# are mandatory; absence of bwrap on the runner is a hard failure here.
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'worker/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'esbuild.config.mjs'
+      - 'tsconfig.json'
+      - 'vitest.config.ts'
+      - '.github/workflows/sandbox.yml'
+  push:
+    branches:
+      - main
+
+jobs:
+  sandbox:
+    name: bwrap + seccomp integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps (bubblewrap, libseccomp-dev)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bubblewrap libseccomp-dev libseccomp2 build-essential pkg-config
+          bwrap --version
+          pkg-config --modversion libseccomp
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python worker deps
+        run: pip install -r worker/requirements-cad.txt
+
+      - name: npm install
+        run: npm ci
+
+      - name: Build seccomp filter blob
+        run: |
+          make -C worker seccomp_filter.bpf seccomp_filter.bpf.sha256
+          test -s worker/seccomp_filter.bpf
+          cat worker/seccomp_filter.bpf.sha256
+
+      - name: Build cad_preexec wrapper (rlimit fallback)
+        run: make -C worker cad_preexec
+
+      - name: Capture clone-flag evidence on this runner
+        run: |
+          # PLA-106 §2.1 requires the deploy-host clone-flag capture before
+          # locking the BPF mask for a release. The CI runner is a reasonable
+          # proxy for the deploy host (Ubuntu 24.04). NEW14 will catch a
+          # mismatch.
+          strace -e clone,clone3 -f python3 \
+            -c "import threading; threading.Thread(target=lambda: None).start()" \
+            2>&1 | tail -10 | tee clone-evidence-ci.txt
+
+      - name: Build TypeScript bundles
+        run: npm run build
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Run bwrap integration matrix
+        run: npx vitest run --config ./vitest.config.ts src/sandbox.bwrap.test.ts
+
+      - name: Run perf tests (PLA-106 §6.2 gates)
+        run: npx vitest run --config ./vitest.config.ts src/sandbox.bwrap.perf.test.ts
