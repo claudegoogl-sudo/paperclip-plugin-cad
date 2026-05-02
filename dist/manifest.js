@@ -32,7 +32,7 @@ var manifest = {
   // a sha256 length check at startup is the intended fail-closed signal.
   worker: {
     seccompFilterPath: "./worker/seccomp_filter.bpf",
-    seccompFilterSha256: "__PLA114_SECCOMP_FILTER_SHA256__"
+    seccompFilterSha256: "20116f0889f407713d3dbac87751a9d7fa09ea1f84dcd31e441f7db7b4e88d92"
   },
   // instanceConfigSchema — ties secret-scope strictly to githubPatSecretId
   // (PLA-41 remediation #2). Fields validated by the host before plugin load.

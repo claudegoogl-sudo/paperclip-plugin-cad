@@ -50,7 +50,7 @@
 
 import { spawn, type StdioOptions } from "node:child_process";
 import { mkdtemp } from "node:fs/promises";
-import { existsSync, openSync, closeSync, statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -109,6 +109,22 @@ const WORKER_PY = join(__dirname, "cad_worker.py");
  * `<repo>/worker/seccomp_filter.bpf` via the same relative.
  */
 const SECCOMP_FILTER_PATH = join(__dirname, "..", "worker", "seccomp_filter.bpf");
+
+/**
+ * Path to the python-side seccomp loader (PLA-114 / PLA-106 §1 rev 4).
+ * The worker bootstrap installs the filter from inside the python process
+ * after trusted import-time setup, because bubblewrap's `--seccomp <fd>`
+ * mechanism applies the filter before the launcher's own execve into the
+ * target — incompatible with a filter that denylists execve. See the
+ * docstring at the top of `worker/seccomp_load.py` for the full rationale.
+ */
+const SECCOMP_LOADER_PATH = join(__dirname, "..", "worker", "seccomp_load.py");
+
+/** Sandbox-internal mount root for trusted bootstrap files. */
+const SANDBOX_ROOT = "/sandbox";
+const SANDBOX_FILTER_PATH = `${SANDBOX_ROOT}/seccomp_filter.bpf`;
+const SANDBOX_LOADER_PATH = `${SANDBOX_ROOT}/seccomp_load.py`;
+const SANDBOX_WORKER_PATH = `${SANDBOX_ROOT}/cad_worker.py`;
 
 /**
  * Path to the preexec wrapper used as a fallback when the deploy host's
@@ -194,6 +210,8 @@ export interface SpawnModeDecision {
   bwrapHasNativeRlimits?: boolean;
   /** Resolved seccomp filter path (validated existence). */
   seccompFilterPath?: string;
+  /** Resolved python seccomp loader path (validated existence). */
+  seccompLoaderPath?: string;
   /** Path to the preexec ELF (only used when bwrap < 0.6). */
   preexecPath?: string;
 }
@@ -268,6 +286,12 @@ export function selectSpawnMode(
         "Build it with `make -C worker seccomp_filter.bpf` (requires libseccomp-dev).",
     );
   }
+  if (!existsSync(SECCOMP_LOADER_PATH)) {
+    throw new CadWorkerInternalError(
+      `Option B sandbox unavailable: python seccomp loader not found at ${SECCOMP_LOADER_PATH}. ` +
+        "This file ships in worker/ alongside the filter source.",
+    );
+  }
   const v = bwrapVersionOf(bwrapPath);
   // NOTE: upstream bubblewrap (through 0.9.0, the version Ubuntu 24.04 ships)
   // does NOT expose --rlimit-* flags despite older docs that suggested they
@@ -291,6 +315,7 @@ export function selectSpawnMode(
     bwrapVersion: v ?? undefined,
     bwrapHasNativeRlimits: native,
     seccompFilterPath: SECCOMP_FILTER_PATH,
+    seccompLoaderPath: SECCOMP_LOADER_PATH,
     preexecPath: native ? undefined : PREEXEC_PATH,
   };
 }
@@ -300,8 +325,7 @@ export function selectSpawnMode(
 // ---------------------------------------------------------------------------
 
 /**
- * Inputs to {@link buildSpawnInvocation}. Pure values only; the caller is
- * responsible for opening any file descriptors that need to be inherited.
+ * Inputs to {@link buildSpawnInvocation}. Pure values only.
  */
 export interface BuildSpawnOpts {
   decision: SpawnModeDecision;
@@ -309,13 +333,6 @@ export interface BuildSpawnOpts {
   workdir: string;
   /** Python interpreter path. Defaults to "python3". */
   pythonBin?: string;
-  /**
-   * File descriptor of the seccomp filter blob, opened read-only by the
-   * caller. Only consulted when `decision.mode === "bwrap+seccomp"`. Caller
-   * passes it via the `stdio` array and closes its parent-side handle after
-   * spawn returns.
-   */
-  seccompFd?: number;
   /** rlimit table (PLA-106 §3). */
   rlimits: RlimitTable;
 }
@@ -330,47 +347,44 @@ export interface SpawnInvocation {
   args: string[];
   env: NodeJS.ProcessEnv;
   /**
-   * stdio shape passed to child_process.spawn. Indices 0/1/2 are stdin/stdout/
-   * stderr pipes; index 3+ may be { type: "fd", fd } entries for FD inheritance.
-   * The `--seccomp 10` argv depends on the filter FD landing in the bwrap
-   * process at FD 10; we achieve that by passing the parent-side FD on the
-   * Node `stdio` array slot 3, which becomes child FD 3. bwrap relays FDs
-   * via the `--seccomp <N>` argument, where N is the FD number AS SEEN BY
-   * bwrap. We chose `10` to match the spec; we land it at FD 10 inside bwrap
-   * by chaining `--file 10 <fd>` is **not** what bwrap supports for seccomp
-   * — bwrap reads `--seccomp <N>` directly, so we instead pass the FD via
-   * `stdio` and use that FD number directly in argv.
-   *
-   * Concrete chosen form (Node 20 child_process.spawn):
-   *   stdio: [
-   *     "pipe",                                 // 0 = stdin to worker
-   *     "pipe",                                 // 1 = stdout from worker
-   *     "pipe",                                 // 2 = stderr (bwrap + python)
-   *     { type: "fd", fd: seccompFd } as any,   // 3 = filter blob, NOT closed-on-exec
-   *   ]
-   *
-   * argv then references `--seccomp 3`. (We use 3 instead of 10 because Node
-   * 20 deterministically lands the first `{type:"fd"}` entry at FD 3 in the
-   * child; using FD 10 would require a manual dup2 dance that bwrap also
-   * already does internally. The spec named "10" as a convention; the
-   * security-relevant property — filter FD reaches bwrap with no leak —
-   * is preserved.)
+   * stdio shape passed to child_process.spawn. Stdin/stdout/stderr only:
+   * the seccomp filter blob is delivered to the worker via `--ro-bind`
+   * inside the sandbox, not via FD inheritance. The python bootstrap reads
+   * the blob from the read-only mount and installs it via prctl after
+   * trusted import-time setup completes (PLA-106 §1 rev 4).
    */
   stdio: StdioOptions;
 }
 
 /**
+ * Bootstrap one-expression executed by `python3 -c`. PLA-106 §1 rev 4:
+ * insert /sandbox into sys.path, install the seccomp filter via the loader
+ * shim, then import the worker. `lock_down(...)` is lexically before
+ * `import cad_worker` — the contract is that no untrusted code reaches the
+ * import system before the filter is in force (§1.2 invariant).
+ *
+ * Kept on a single physical line so the argv survives any quoting layer
+ * intact and so a reader can verify the lock-then-import ordering at a
+ * glance.
+ */
+const PYTHON_BOOTSTRAP =
+  "import sys; sys.path.insert(0, '/sandbox'); " +
+  "from seccomp_load import lock_down; " +
+  "lock_down('/sandbox/seccomp_filter.bpf'); " +
+  "import cad_worker; cad_worker.main()";
+
+/**
  * Build the spawn invocation. Pure function — no I/O, no global side effects.
  *
- * The seccomp FD plumbing chosen (PLA-114 spec §1 + §5.3):
- *   - The caller opens `seccomp_filter.bpf` read-only with `openSync(..., 'r')`
- *     before calling this function.
- *   - We declare the `stdio` slot at index 3 to inherit that FD into the
- *     child as FD 3 (Node 20 `child_process.spawn` inherits the listed
- *     parent FDs into sequential child FDs starting at 0).
- *   - The bwrap argv uses `--seccomp 3` to consume the filter from that FD.
- *   - The caller closes the parent-side FD immediately after spawn returns;
- *     no other child can inherit it (we don't keep it open across spawns).
+ * Filter delivery (PLA-106 §1 rev 4):
+ *   - The seccomp BPF blob and the python loader shim are mounted read-only
+ *     into the sandbox at /sandbox/seccomp_filter.bpf and /sandbox/seccomp_load.py.
+ *   - The argv tail is `python3 -c "<bootstrap>"`. The bootstrap imports the
+ *     loader, calls `lock_down(blob_path)`, and only then imports the worker.
+ *   - No FD-3 inheritance, no `--seccomp <fd>`. bwrap's `--seccomp` mechanism
+ *     is incompatible with a filter that denylists execve (the launcher's
+ *     own execve gets killed before any target code runs); hence the python-
+ *     side install pattern used by Chromium / Firefox / sandbox2.
  */
 export function buildSpawnInvocation(opts: BuildSpawnOpts): SpawnInvocation {
   const pythonBin = opts.pythonBin ?? "python3";
@@ -392,14 +406,12 @@ export function buildSpawnInvocation(opts: BuildSpawnOpts): SpawnInvocation {
     };
   }
 
-  // bwrap+seccomp path. Argv per PLA-106 §1 (mount allowlist) + §3 (rlimits).
-  if (opts.seccompFd === undefined) {
-    throw new CadWorkerInternalError(
-      "buildSpawnInvocation(bwrap+seccomp): seccompFd is required",
-    );
-  }
+  // bwrap+seccomp path. Argv per PLA-106 §1 rev 4 (mount allowlist + ro-bind
+  // delivery of filter blob and loader shim) + §3 (rlimits).
   const bwrap = opts.decision.bwrapPath!;
   const venvPython = pythonBin;
+  const filterBlob = opts.decision.seccompFilterPath!;
+  const loaderShim = opts.decision.seccompLoaderPath!;
 
   const args: string[] = [
     "--unshare-all",
@@ -421,17 +433,20 @@ export function buildSpawnInvocation(opts: BuildSpawnOpts): SpawnInvocation {
     "--ro-bind", "/lib64", "/lib64",
     "--ro-bind", "/bin", "/bin",
     "--ro-bind", "/etc/ld.so.cache", "/etc/ld.so.cache",
-    "--ro-bind", WORKER_PY, WORKER_PY,
+    // Trusted bootstrap files mounted under /sandbox. The loader shim and
+    // filter blob are both content-pinned by the build manifest (§5.2).
+    "--ro-bind", filterBlob, SANDBOX_FILTER_PATH,
+    "--ro-bind", loaderShim, SANDBOX_LOADER_PATH,
+    "--ro-bind", WORKER_PY, SANDBOX_WORKER_PATH,
     "--tmpfs", "/tmp",
     "--bind", opts.workdir, opts.workdir,
     "--chdir", opts.workdir,
     "--cap-drop", "ALL",
-    // Filter FD: the parent-side FD lives at child FD 3 (first `stdio` extra).
-    "--seccomp", "3",
   ];
 
-  // Rlimits: prefer bwrap native flags (>= 0.6); else pass through preexec
-  // wrapper invoked between bwrap and python.
+  // Rlimits: prefer bwrap native flags (>= 0.6 in theory; in practice the
+  // bubblewrap shipped on Ubuntu 24.04 (0.9.0) does NOT have them, so the
+  // preexec branch is what actually runs). See selectSpawnMode comment.
   if (opts.decision.bwrapHasNativeRlimits) {
     args.push(
       "--rlimit-as", String(opts.rlimits.asBytes),
@@ -441,12 +456,12 @@ export function buildSpawnInvocation(opts: BuildSpawnOpts): SpawnInvocation {
       "--rlimit-cpu", String(opts.rlimits.cpuSeconds),
       "--rlimit-core", String(opts.rlimits.coreBytes),
     );
-    args.push("--", venvPython, WORKER_PY);
+    args.push("--", venvPython, "-c", PYTHON_BOOTSTRAP);
   } else {
     const preexec = opts.decision.preexecPath!;
     // The preexec wrapper consumes its rlimits from env vars and execvp()s
     // its argv[1..]. We bind-mount it into the sandbox at its absolute path
-    // so the worker can find it.
+    // so bwrap can find it.
     args.push("--ro-bind", preexec, preexec);
     args.push("--setenv", "CAD_PREEXEC_RLIMIT_AS", String(opts.rlimits.asBytes));
     args.push("--setenv", "CAD_PREEXEC_RLIMIT_NPROC", String(opts.rlimits.nproc));
@@ -454,20 +469,12 @@ export function buildSpawnInvocation(opts: BuildSpawnOpts): SpawnInvocation {
     args.push("--setenv", "CAD_PREEXEC_RLIMIT_FSIZE", String(opts.rlimits.fsizeBytes));
     args.push("--setenv", "CAD_PREEXEC_RLIMIT_CPU", String(opts.rlimits.cpuSeconds));
     args.push("--setenv", "CAD_PREEXEC_RLIMIT_CORE", String(opts.rlimits.coreBytes));
-    args.push("--", preexec, venvPython, WORKER_PY);
+    args.push("--", preexec, venvPython, "-c", PYTHON_BOOTSTRAP);
   }
 
-  // The seccomp filter FD is passed via the stdio slot at index 3.
-  // Node 20 docs: each entry in `stdio` after [0..2] becomes a child FD at
-  // the same index (so slot 3 → child FD 3). The `{ type: "fd", fd }` form
-  // inherits the parent FD without closing it; the caller closes it after
-  // spawn() returns.
-  const stdio: StdioOptions = [
-    "pipe",
-    "pipe",
-    "pipe",
-    { type: "fd", fd: opts.seccompFd } as unknown as "pipe",
-  ];
+  // No extra FDs. The filter blob is read by the python bootstrap from the
+  // ro-bind mount, not inherited as an FD.
+  const stdio: StdioOptions = ["pipe", "pipe", "pipe"];
 
   return {
     command: bwrap,
@@ -521,39 +528,22 @@ export async function invokeWorker(
 ): Promise<WorkerResult> {
   const rlimits = defaultRlimits(timeoutSeconds);
 
-  // Open the seccomp filter blob ONCE per spawn. The FD is inherited into
-  // the bwrap child at FD 3 and consumed by `--seccomp 3`. We close the
-  // parent-side handle immediately after spawn() returns to avoid FD leaks
-  // to any sibling children — though there are none in this codepath.
-  let seccompFd: number | undefined;
-  if (decision.mode === "bwrap+seccomp") {
-    seccompFd = openSync(decision.seccompFilterPath!, "r");
-  }
-
-  let invocation: SpawnInvocation;
-  try {
-    invocation = buildSpawnInvocation({
-      decision,
-      workdir: job.workdir,
-      pythonBin,
-      seccompFd,
-      rlimits,
-    });
-  } catch (err) {
-    if (seccompFd !== undefined) closeSync(seccompFd);
-    throw err;
-  }
+  // PLA-106 §1 rev 4: the seccomp filter blob is delivered to the worker
+  // via a `--ro-bind` mount inside the sandbox. The bootstrap reads it from
+  // /sandbox/seccomp_filter.bpf and installs it via prctl after the trusted
+  // imports complete. No parent-side FD plumbing.
+  const invocation = buildSpawnInvocation({
+    decision,
+    workdir: job.workdir,
+    pythonBin,
+    rlimits,
+  });
 
   return new Promise((resolve) => {
     const child = spawn(invocation.command, invocation.args, {
       stdio: invocation.stdio,
       env: invocation.env,
     });
-
-    // Close the parent-side filter FD now that the child has inherited it.
-    if (seccompFd !== undefined) {
-      try { closeSync(seccompFd); } catch { /* already closed */ }
-    }
 
     let stdout = "";
     let stderr = "";

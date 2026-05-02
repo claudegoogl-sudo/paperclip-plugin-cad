@@ -32,6 +32,7 @@ set -euo pipefail
 
 WORKER_DIR="$(cd "$(dirname "$0")" && pwd)"
 FILTER_BPF="${WORKER_DIR}/seccomp_filter.bpf"
+LOADER_SHIM="${WORKER_DIR}/seccomp_load.py"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
@@ -46,20 +47,31 @@ if [[ ! -f "$FILTER_BPF" ]]; then
   echo "missing $FILTER_BPF — run: make -C worker seccomp_filter.bpf" >&2
   exit 2
 fi
+if [[ ! -f "$LOADER_SHIM" ]]; then
+  echo "missing $LOADER_SHIM — required for python-side seccomp install" >&2
+  exit 2
+fi
 
 host_uname="$(uname -nr)"
 host_glibc="$(ldd --version 2>&1 | head -n1)"
 host_python="$(python3 --version 2>&1)"
 today="$(date -u +%Y-%m-%d)"
 
-# bwrap argv that mirrors the production sandbox spawn path (spec §1).
-# Each step substitutes its own command at the end. FD 10 is the filter.
+# bwrap argv mirrors the production sandbox spawn path (PLA-106 §1 rev 4).
+# The seccomp filter blob and the python loader shim are mounted read-only
+# under /sandbox/, and the python bootstrap installs the filter via prctl
+# *after* trusted import-time setup completes. bwrap's `--seccomp <fd>`
+# mechanism is NOT used: it would prctl-install the filter between fork and
+# execve, killing the launcher's own execve into the target.
 bwrap_argv=(
   bwrap
   --unshare-all
   --die-with-parent
   --clearenv
   --new-session
+  --setenv PATH /usr/bin:/bin
+  --setenv PYTHONDONTWRITEBYTECODE 1
+  --setenv PYTHONUNBUFFERED 1
   --proc /proc
   --dev /dev
   --tmpfs /tmp
@@ -68,61 +80,52 @@ bwrap_argv=(
   --ro-bind /lib64 /lib64
   --ro-bind /bin /bin
   --ro-bind /etc/ld.so.cache /etc/ld.so.cache
-  --seccomp 10
+  --ro-bind "$FILTER_BPF" /sandbox/seccomp_filter.bpf
+  --ro-bind "$LOADER_SHIM" /sandbox/seccomp_load.py
 )
 
-run_in_sandbox() {
-  # shellcheck disable=SC2068  # intentional word-split of arg array
-  exec 10<"$FILTER_BPF"
-  "${bwrap_argv[@]}" -- "$@"
-  local rc=$?
-  exec 10<&-
-  return $rc
+# Run a python-c bootstrap inside the sandbox under the production seccomp
+# filter. The bootstrap calls lock_down() before any user-influenced code
+# runs, mirroring the §1.2 invariant. Caller passes the post-lock_down
+# python expression as $1.
+run_in_sandbox_py() {
+  local post_lock_expr="$1"
+  local bootstrap="import sys; sys.path.insert(0, '/sandbox'); from seccomp_load import lock_down; lock_down('/sandbox/seccomp_filter.bpf'); ${post_lock_expr}"
+  "${bwrap_argv[@]}" -- /usr/bin/python3 -c "$bootstrap"
 }
 
-# ---------- Step 1: clone3 -> ENOSYS ----------
+# ---------- Step 1: clone3 -> ENOSYS (probe via ctypes inside python) ----------
+#
+# Under the production seccomp filter, execve is on the killlist (covered by
+# layer 1; the python bootstrap calls lock_down BEFORE invoking the probe so
+# we cannot exec into a separate C binary post-lock). The clone3 syscall is
+# trivially expressible in ctypes from inside the python process, so we
+# inline the probe rather than launching a child.
 
 step1() {
-  cat >"$TMPDIR/clone3_probe.c" <<'C'
-#define _GNU_SOURCE
-#include <errno.h>
-#include <signal.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <sys/syscall.h>
-#include <linux/sched.h>
-
-/* clone3 syscall number is not always in glibc headers; pin the value. */
-#ifndef SYS_clone3
-#define SYS_clone3 435
-#endif
-
-struct clone_args_v0 {
-    unsigned long long flags;
-    unsigned long long pidfd;
-    unsigned long long child_tid;
-    unsigned long long parent_tid;
-    unsigned long long exit_signal;
-    unsigned long long stack;
-    unsigned long long stack_size;
-    unsigned long long tls;
-};
-
-int main(void) {
-    struct clone_args_v0 args = {0};
-    args.flags = 0;
-    args.exit_signal = SIGCHLD;
-    long rc = syscall(SYS_clone3, &args, sizeof(args));
-    int e = errno;
-    printf("clone3_rc=%ld errno=%d (%s)\n", rc, e,
-           e == ENOSYS ? "ENOSYS" : "OTHER");
-    if (rc == -1 && e == ENOSYS) return 0;
-    return 1;
-}
-C
-  cc -O2 -Wall -o "$TMPDIR/clone3_probe" "$TMPDIR/clone3_probe.c"
-  if run_in_sandbox "$TMPDIR/clone3_probe"; then
+  if run_in_sandbox_py "$(cat <<'PY'
+import ctypes, errno, sys
+SYS_clone3 = 435
+class CloneArgs(ctypes.Structure):
+    _fields_ = [
+        ('flags', ctypes.c_ulonglong),
+        ('pidfd', ctypes.c_ulonglong),
+        ('child_tid', ctypes.c_ulonglong),
+        ('parent_tid', ctypes.c_ulonglong),
+        ('exit_signal', ctypes.c_ulonglong),
+        ('stack', ctypes.c_ulonglong),
+        ('stack_size', ctypes.c_ulonglong),
+        ('tls', ctypes.c_ulonglong),
+    ]
+libc = ctypes.CDLL('libc.so.6', use_errno=True)
+args = CloneArgs()
+args.exit_signal = 17  # SIGCHLD
+rc = libc.syscall(SYS_clone3, ctypes.byref(args), ctypes.sizeof(args))
+e = ctypes.get_errno()
+sys.stdout.write(f'clone3_rc={rc} errno={e} ({"ENOSYS" if e == errno.ENOSYS else "OTHER"})\n')
+sys.exit(0 if rc == -1 and e == errno.ENOSYS else 1)
+PY
+)"; then
     echo "| $today | $host_uname | $host_glibc | -1 | ENOSYS | Option 5 valid ✓ |"
     return 0
   else
@@ -134,15 +137,15 @@ C
 # ---------- Step 2: threading.Thread().start() ----------
 
 step2() {
-  cat >"$TMPDIR/thread_probe.py" <<'PY'
+  if run_in_sandbox_py "$(cat <<'PY'
 import sys, threading
 t = threading.Thread(target=lambda: None)
 t.start()
 t.join()
-print("threading_ok")
+sys.stdout.write('threading_ok\n')
 sys.exit(0)
 PY
-  if run_in_sandbox python3 "$TMPDIR/thread_probe.py"; then
+)"; then
     echo "| $today | $host_uname | $host_python | $host_glibc | 0 | Mechanism functioning ✓ |"
     return 0
   else
@@ -155,27 +158,28 @@ PY
 
 step3() {
   require strace
-  cat >"$TMPDIR/n4_probe.py" <<'PY'
+  local probe_expr
+  probe_expr="$(cat <<'PY'
 import threading
-def run():
-    for _ in range(4):
-        t = threading.Thread(target=lambda: None)
-        t.start()
-        t.join()
-run()
+for _ in range(4):
+    t = threading.Thread(target=lambda: None)
+    t.start()
+    t.join()
 PY
-  # Use strace -c to aggregate counts; -f follows the python child created by
+)"
+  local bootstrap="import sys; sys.path.insert(0, '/sandbox'); from seccomp_load import lock_down; lock_down('/sandbox/seccomp_filter.bpf'); ${probe_expr}"
+  # strace -c aggregates counts; -f follows the python child created by
   # bwrap. We invoke strace OUTSIDE bwrap (tracing bwrap+python) because
   # ptrace(2) is denied by the filter; the trace is on the host side,
   # observing syscalls from the sandboxed task via the kernel's ptrace
   # accounting. strace -c emits an ascii table to stderr.
-  exec 10<"$FILTER_BPF"
+  set +e
   strace -f -c -e trace=clone,clone3 -o "$TMPDIR/n4.trace" \
-    "${bwrap_argv[@]}" -- python3 "$TMPDIR/n4_probe.py"
+    "${bwrap_argv[@]}" -- /usr/bin/python3 -c "$bootstrap"
   local rc=$?
-  exec 10<&-
+  set -e
   if [[ $rc -ne 0 ]]; then
-    echo "n4_probe.py exited non-zero ($rc); cannot measure cleanly" >&2
+    echo "n4_probe exited non-zero ($rc); cannot measure cleanly" >&2
     return 1
   fi
   # strace -c -o writes counts to file; parse the clone/clone3 rows.
@@ -201,22 +205,27 @@ case "${1:-}" in
   s2) step2 ;;
   s3) step3 ;;
   all)
+    # CTO 15:56 directive: NO `|| true` masks. Each step runs under
+    # `set -euo pipefail`, and a failing step exits the script with the
+    # step's return code so §6.4 evidence cannot silently regress. To
+    # capture all three step outcomes in a single run (for diagnosis), the
+    # caller can run s1/s2/s3 individually.
     echo "## §6.4 evidence — $(uname -nr) — $today"
     echo
     echo "### Step 1"
     echo "| Date | Host | glibc | clone3 return | errno | Verdict |"
     echo "| --- | --- | --- | --- | --- | --- |"
-    step1 || true
+    step1
     echo
     echo "### Step 2"
     echo "| Date | Host | Python | glibc | Exit | Verdict |"
     echo "| --- | --- | --- | --- | --- | --- |"
-    step2 || true
+    step2
     echo
     echo "### Step 3"
     echo "| Date | Host | glibc | Tool | clone3 | clone2 | Verdict |"
     echo "| --- | --- | --- | --- | --- | --- | --- |"
-    step3 || true
+    step3
     ;;
   *)
     echo "usage: $0 {s1|s2|s3|all}" >&2

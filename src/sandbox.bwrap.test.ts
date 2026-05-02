@@ -24,7 +24,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdtemp, access } from "node:fs/promises";
 import { constants, existsSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 
 import {
   invokeWorker,
@@ -532,6 +532,96 @@ describe.skipIf(!HAS_BWRAP)("PLA-114 §4 — bwrap+seccomp integration matrix", 
       ].join("\n"));
       expect(isKernelKill(r) || !r.ok).toBe(true);
       expect(envelopeMatches(r, /child_pid=\d+/i)).toBe(false);
+    }, T);
+
+    it("NEW16: monkey-patched lock_down → previously-killed syscall permitted (lock-is-load-bearing canary)", async () => {
+      // Counterfactual companion to NEW4 (ptrace → SIGSYS under the real
+      // filter). We spawn bwrap with a bootstrap that REPLACES
+      // seccomp_load.lock_down with a no-op BEFORE the production-shape
+      // bootstrap line that calls it, then attempts the same kind of
+      // syscall NEW4 expects to be SIGSYS-killed.
+      //
+      // If the filter alone (without lock_down running) were what's
+      // enforcing — e.g., if some other layer of the sandbox already
+      // installed it — the syscall would still be SIGSYS-killed and this
+      // test would fail. The test therefore proves the python-side
+      // lock_down() call in the production bootstrap is load-bearing for
+      // every R-class and NEW-class kernel-kill assertion above.
+      //
+      // The chosen syscall is ptrace(PTRACE_TRACEME=0, 0, 0, 0): under
+      // the real filter it is unconditionally killed (§2 denylist);
+      // without the filter it returns 0 (the kernel permits a process
+      // to mark itself ptrace-able) — no SIGSYS, normal exit.
+      const filterPath = DECISION.seccompFilterPath!;
+      const loaderPath = DECISION.seccompLoaderPath!;
+      const bwrap = DECISION.bwrapPath!;
+      const workdir = await freshWorkdir();
+
+      // Custom bootstrap. Production bootstrap shape is preserved
+      // (sys.path insert → import seccomp_load → call lock_down → continue)
+      // but lock_down is replaced before the call, so the call is a no-op.
+      const bootstrap = [
+        "import sys",
+        "sys.path.insert(0, '/sandbox')",
+        "import seccomp_load",
+        "seccomp_load.lock_down = lambda blob_path: None",
+        "seccomp_load.lock_down('/sandbox/seccomp_filter.bpf')",
+        "import ctypes",
+        "libc = ctypes.CDLL('libc.so.6', use_errno=True)",
+        "rc = libc.ptrace(0, 0, 0, 0)",
+        "print(f'NEW16:ptrace_rc={rc}')",
+        "sys.exit(0)",
+      ].join("; ");
+
+      const args: string[] = [
+        "--unshare-all",
+        "--die-with-parent",
+        "--new-session",
+        "--clearenv",
+        "--setenv", "PATH", "/usr/bin:/bin",
+        "--setenv", "PYTHONDONTWRITEBYTECODE", "1",
+        "--setenv", "PYTHONUNBUFFERED", "1",
+        "--uid", "65534", "--gid", "65534",
+        "--hostname", "cad-worker",
+        "--proc", "/proc",
+        "--dev", "/dev",
+        "--ro-bind", "/usr", "/usr",
+        "--ro-bind", "/lib", "/lib",
+        "--ro-bind", "/lib64", "/lib64",
+        "--ro-bind", "/bin", "/bin",
+        "--ro-bind", "/etc/ld.so.cache", "/etc/ld.so.cache",
+        "--ro-bind", filterPath, "/sandbox/seccomp_filter.bpf",
+        "--ro-bind", loaderPath, "/sandbox/seccomp_load.py",
+        "--tmpfs", "/tmp",
+        "--bind", workdir, workdir,
+        "--chdir", workdir,
+        "--cap-drop", "ALL",
+        "--", "/usr/bin/python3", "-c", bootstrap,
+      ];
+
+      const result = await new Promise<{
+        code: number | null;
+        signal: NodeJS.Signals | null;
+        stdout: string;
+        stderr: string;
+      }>((resolve) => {
+        const child = spawn(bwrap, args, {
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        let stdout = "";
+        let stderr = "";
+        child.stdout?.on("data", (b: Buffer) => { stdout += b.toString("utf8"); });
+        child.stderr?.on("data", (b: Buffer) => { stderr += b.toString("utf8"); });
+        child.on("close", (code, signal) => resolve({ code, signal, stdout, stderr }));
+      });
+
+      // Filter NOT active (lock_down was no-op'd) → ptrace permitted →
+      // process exits 0, no SIGSYS. If the filter were somehow active
+      // anyway, signal === "SIGSYS" here would mean lock_down isn't the
+      // load-bearing call we believe it to be.
+      expect(result.signal).not.toBe("SIGSYS");
+      expect(result.code).toBe(0);
+      expect(result.stdout).toMatch(/NEW16:ptrace_rc=/);
     }, T);
   });
 

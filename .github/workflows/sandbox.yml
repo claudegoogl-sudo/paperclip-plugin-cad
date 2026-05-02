@@ -179,30 +179,51 @@ jobs:
           rcA=$?
           echo "phase-A exit=$rcA"
 
-          # ----- Phase B: bwrap+seccomp, /bin/echo (no preexec) -----------
-          # Validates that the seccomp filter does not kill bwrap's launch
-          # execve into a static binary. If this fails with 159, the filter
-          # itself is denylisting execve and the design is broken on this
-          # runner; if it succeeds, the failure is downstream (cad_preexec or
-          # python startup).
-          echo "=== Phase B: bwrap+seccomp /bin/echo ==="
-          exec 4<worker/seccomp_filter.bpf
+          # ----- Phase B: bwrap+seccomp via python-side install -----------
+          # PLA-106 §1 rev 4: the BPF blob is delivered into the sandbox via
+          # --ro-bind, and the python bootstrap installs it via prctl after
+          # trusted import-time setup. Phase B exercises the loader shim end-
+          # to-end without invoking cad_worker — if lock_down() succeeds and
+          # python exits 0, the python-side install path works on this runner.
+          # If this fails with 159 (SIGSYS), the filter is killing a syscall
+          # the python bootstrap itself emits (read/openat/mmap/etc.) and the
+          # filter source needs investigation.
+          echo "=== Phase B: bwrap + python-side seccomp install ==="
+          FILTER_BLOB="$PWD/worker/seccomp_filter.bpf"
+          LOADER_SHIM="$PWD/worker/seccomp_load.py"
+          test -s "$FILTER_BLOB" || { echo "missing $FILTER_BLOB"; exit 2; }
+          test -s "$LOADER_SHIM" || { echo "missing $LOADER_SHIM"; exit 2; }
           bwrap --unshare-all --die-with-parent --new-session --clearenv \
             --setenv PATH /usr/bin:/bin \
+            --setenv PYTHONDONTWRITEBYTECODE 1 --setenv PYTHONUNBUFFERED 1 \
             --uid 65534 --gid 65534 --hostname cad-worker \
             --proc /proc --dev /dev \
             --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
             --ro-bind /bin /bin --ro-bind /etc/ld.so.cache /etc/ld.so.cache \
-            --tmpfs /tmp --cap-drop ALL --seccomp 4 \
-            -- /bin/echo "phase-B: bwrap+seccomp OK"
+            --ro-bind "$FILTER_BLOB" /sandbox/seccomp_filter.bpf \
+            --ro-bind "$LOADER_SHIM" /sandbox/seccomp_load.py \
+            --tmpfs /tmp --cap-drop ALL \
+            -- /usr/bin/python3 -c "import sys; sys.path.insert(0, '/sandbox'); from seccomp_load import lock_down; lock_down('/sandbox/seccomp_filter.bpf'); print('phase-B: lock_down OK')"
           rcB=$?
-          exec 4<&-
           echo "phase-B exit=$rcB"
 
           # ----- Phase C: full production argv ----------------------------
-          echo "=== Phase C: bwrap+seccomp+preexec+python ==="
-          exec 3<worker/seccomp_filter.bpf
-          bwrap \
+          # Mirrors buildSpawnInvocation in src/cad-worker-client.ts for the
+          # non-native-rlimits codepath. Mounts the filter blob, the loader
+          # shim, and cad_worker.py at /sandbox/, runs python -c with the
+          # production bootstrap, and feeds a no-op job via stdin so
+          # cad_worker.main() exits cleanly.
+          echo "=== Phase C: bwrap+seccomp+preexec+python (full production argv) ==="
+          WORKER_PY="$PWD/src/cad_worker.py"
+          test -s "$WORKER_PY" || { echo "missing $WORKER_PY"; exit 2; }
+          # cad_worker.main() reads a JSON job from stdin. A trivial empty-
+          # script job should round-trip without writing artifacts; if the
+          # script-execution path errors, we just need a non-SIGSYS exit so
+          # the smoke gate can demonstrate the python-side seccomp install
+          # didn't kill the worker before main() ran.
+          PROBE_JOB='{"script":"","format":"step","workdir":"/tmp/cad-bwrap-smoke"}'
+          BOOTSTRAP="import sys; sys.path.insert(0, '/sandbox'); from seccomp_load import lock_down; lock_down('/sandbox/seccomp_filter.bpf'); import cad_worker; cad_worker.main()"
+          echo "$PROBE_JOB" | bwrap \
             --unshare-all \
             --die-with-parent \
             --new-session \
@@ -228,19 +249,29 @@ jobs:
             --ro-bind /lib64 /lib64 \
             --ro-bind /bin /bin \
             --ro-bind /etc/ld.so.cache /etc/ld.so.cache \
+            --ro-bind "$FILTER_BLOB" /sandbox/seccomp_filter.bpf \
+            --ro-bind "$LOADER_SHIM" /sandbox/seccomp_load.py \
+            --ro-bind "$WORKER_PY" /sandbox/cad_worker.py \
             --ro-bind "$PREEXEC" "$PREEXEC" \
             --tmpfs /tmp \
             --bind /tmp/cad-bwrap-smoke /tmp/cad-bwrap-smoke \
             --chdir /tmp/cad-bwrap-smoke \
             --cap-drop ALL \
-            --seccomp 3 \
-            -- "$PREEXEC" /usr/bin/python3 /tmp/cad-bwrap-smoke/probe.py
+            -- "$PREEXEC" /usr/bin/python3 -c "$BOOTSTRAP"
           rc=$?
-          exec 3<&-
           echo "bwrap-smoke exit=$rc"
-          if [[ $rc -ne 0 ]]; then
-            echo "::error::bwrap+seccomp smoke spawn failed with exit $rc — see stderr above. The bwrap test matrix cannot pass while this is failing."
+          # SIGSYS = 128+31 = 159. Anything other than 159 means the filter
+          # didn't kill the worker bootstrap; a non-zero exit from
+          # cad_worker.main() processing an empty-script job is acceptable
+          # here (the smoke gate's job is to prove the seccomp install
+          # itself works, not that the worker is bug-free).
+          if [[ $rc -eq 159 ]]; then
+            echo "::error::bwrap+seccomp smoke killed by SIGSYS (exit 159) — see stderr above. The seccomp filter is denying a syscall the python bootstrap or cad_worker import path needs. The bwrap test matrix cannot pass while this is failing."
             exit $rc
+          fi
+          if [[ $rcB -ne 0 ]]; then
+            echo "::error::Phase B (python-side seccomp install) failed with exit $rcB — the loader shim cannot complete prctl(PR_SET_SECCOMP) on this runner. Investigate seccomp_load.py and the filter blob before the matrix runs."
+            exit $rcB
           fi
 
       - name: Build TypeScript bundles
