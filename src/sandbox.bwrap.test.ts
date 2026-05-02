@@ -19,7 +19,7 @@
  * failure there.
  */
 
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, afterEach } from "vitest";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdtemp, access } from "node:fs/promises";
@@ -78,10 +78,29 @@ beforeAll(() => {
   expect(DECISION.mode).toBe("bwrap+seccomp");
 });
 
+// Tracks the most recent worker result so that afterEach can dump it on
+// assertion failure. Without this, a failing `expect(...).toBe(true)` only
+// shows "expected false to be true" with no insight into what bwrap/python
+// actually returned — making CI triage on remote runners impossible.
+let LAST_RESULT: WorkerResult | null = null;
+
 async function run(script: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<WorkerResult> {
   const workdir = await freshWorkdir();
-  return invokeWorker({ script, format: "step", workdir }, timeoutSeconds, DECISION);
+  const r = await invokeWorker({ script, format: "step", workdir }, timeoutSeconds, DECISION);
+  LAST_RESULT = r;
+  return r;
 }
+
+afterEach((ctx) => {
+  if (ctx.task.result?.state === "fail" && LAST_RESULT !== null) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[bwrap-test diag] ${ctx.task.name} failed; last worker result:\n` +
+        JSON.stringify(LAST_RESULT, null, 2),
+    );
+  }
+  LAST_RESULT = null;
+});
 
 /**
  * Spec §4 kernel-level discriminator predicate. Returns true if the result
