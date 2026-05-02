@@ -26,6 +26,13 @@ jobs:
   sandbox:
     name: bwrap + seccomp integration
     runs-on: ubuntu-latest
+    # `pull-requests: write` is needed by the diagnostic step that posts
+    # the §6.4 evidence file as a PR comment when the measurement fails;
+    # `contents: read` is the default for non-write workflows. Both kept
+    # minimal and scoped to this job.
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
 
@@ -139,6 +146,32 @@ jobs:
             clone-evidence-ci.txt
             worker/seccomp_filter.bpf.sha256
           if-no-files-found: error
+
+      - name: Post §6.4 evidence inline on failure (diagnostic surface)
+        # GHA artifact downloads require auth even for public repos; PR
+        # comments do not. Posting the evidence file as a PR comment lets
+        # the assignee inspect failure rows from the public comments API
+        # without needing a fresh GitHub PAT. Diagnostic-only — runs only
+        # when the §6.4 step failed and only on PR events. The body is
+        # fenced so markdown table characters render as-is.
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = 'evidence/clone-fallback-ci.md';
+            const body = fs.existsSync(path)
+              ? fs.readFileSync(path, 'utf8')
+              : '(evidence/clone-fallback-ci.md not produced — script failed before any output)';
+            const sha = '${{ github.event.pull_request.head.sha }}';
+            const url = '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}';
+            const truncated = body.length > 60000 ? body.slice(0, 60000) + '\n... (truncated)' : body;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## CI §6.4 measurement failure — diagnostic dump\n\nCommit: \`${sha}\`\nRun: ${url}\n\n<details><summary>evidence/clone-fallback-ci.md</summary>\n\n\`\`\`\n${truncated}\n\`\`\`\n\n</details>`,
+            });
 
       - name: Sandbox smoke — verify bwrap+seccomp can spawn python
         # Diagnostic gate: runs bwrap with the EXACT argv the production
