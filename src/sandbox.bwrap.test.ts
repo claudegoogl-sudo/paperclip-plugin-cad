@@ -774,25 +774,39 @@ describe.skipIf(!HAS_BWRAP)("PLA-114 §4 — bwrap+seccomp integration matrix", 
       // semantics; both prove startup completed without a §2 hit.
       expect([0, 1]).toContain(result.code);
 
-      // Assertion 2: no §2 KILL_PROCESS syscall name in the strace
-      // tail. If a future production import grows a syscall that
-      // crosses §2, the offending name appears here with strace's
-      // standard `<name>(...)` format. We surface it loudly with the
-      // tail attached so the operator can correlate to the §2 row that
-      // needs reclassifying (rev-5-class deviation, requires CTO
-      // endorsement) or fix the import path.
+      // Assertion 2: no §2 KILL_PROCESS syscall name appears AFTER the
+      // filter is installed. Split the strace output at the
+      // `PR_SET_SECCOMP, SECCOMP_MODE_FILTER` line — anything before
+      // that is pre-filter setup (ctypes loading libc, glibc's
+      // vfork+execve to objdump for ifunc resolution, bwrap's own
+      // privileged setup) and is not load-bearing for §2. The
+      // post-filter region is the production CadQuery/OCP/numpy import
+      // path under the real filter — exactly what §2 must let survive.
+      const stderr = result.stderr;
+      const filterInstallRe = /prctl\(PR_SET_SECCOMP,\s*SECCOMP_MODE_FILTER/;
+      const installMatch = filterInstallRe.exec(stderr);
+      if (!installMatch) {
+        throw new Error(
+          `NEW17 setup regression: PR_SET_SECCOMP not observed in strace ` +
+          `output — the filter was never installed. lock_down() failed or ` +
+          `the bootstrap shape drifted. strace tail (last 4kb): ` +
+          stderr.slice(-4096),
+        );
+      }
+      const postFilter = stderr.slice(installMatch.index + installMatch[0].length);
       const offending: string[] = [];
       for (const sc of KILL_SYSCALLS) {
         const re = new RegExp(`\\b${sc}\\(`);
-        if (re.test(result.stderr)) offending.push(sc);
+        if (re.test(postFilter)) offending.push(sc);
       }
       if (offending.length > 0) {
         throw new Error(
           `NEW17 regression: production startup crossed §2 KILL_PROCESS ` +
-          `syscall(s) ${JSON.stringify(offending)}. Either reclassify the ` +
-          `§2 row(s) (rev-5-class deviation, requires CTO endorsement) ` +
-          `or fix the import path. strace tail (last 4kb): ` +
-          result.stderr.slice(-4096),
+          `syscall(s) ${JSON.stringify(offending)} AFTER filter install. ` +
+          `Either reclassify the §2 row(s) (rev-5-class deviation, ` +
+          `requires CTO endorsement) or fix the import path. ` +
+          `Post-filter strace tail (last 4kb): ` +
+          postFilter.slice(-4096),
         );
       }
     }, T);
