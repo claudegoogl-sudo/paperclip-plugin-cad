@@ -14,15 +14,22 @@ type ManifestWithRuntimeRequirements = PaperclipPluginManifestV1 & {
     kernelSandbox: "bubblewrap";
   };
   /**
-   * Build-manifest pin for the seccomp filter blob (PLA-114 acceptance:
-   * "Build manifest pins the seccomp filter blob sha256"). The build script
-   * substitutes the real digest at `dist/manifest.js` build time; the
-   * placeholder below is what ships in source. The host can compare the
-   * declared digest against the on-disk blob it inherits with bwrap.
+   * Build-manifest pin for the seccomp filter blob AND the python-side
+   * loader shim (PLA-114 / PLA-106 §5.2 rev 4: pins **both**
+   * `seccomp_filter.bpf` AND `seccomp_load.py`; runtime hard-errors on
+   * either mismatch). The dual pin closes the substitution-attack window
+   * where an attacker swaps the loader (which calls `prctl(PR_SET_SECCOMP)`)
+   * for a no-op while leaving the filter blob unchanged. The build script
+   * substitutes the real digests at `dist/manifest.js` build time; the
+   * placeholders below are what ship in source. An unsubstituted
+   * placeholder failing a sha256 length check at startup is the intended
+   * fail-closed signal.
    */
   worker?: {
     seccompFilterPath: string;
     seccompFilterSha256: string;
+    seccompLoaderPath: string;
+    seccompLoaderSha256: string;
   };
 };
 
@@ -60,14 +67,21 @@ const manifest: ManifestWithRuntimeRequirements = {
     kernelSandbox: "bubblewrap",
   },
 
-  // PLA-114 acceptance — pin the seccomp filter blob digest. The build
+  // PLA-114 acceptance — pin the seccomp filter blob digest AND the
+  // python-side loader shim digest (rev-4 §5.2 dual pin). The build
   // script reads `worker/seccomp_filter.bpf.sha256` (produced by
-  // `make -C worker`) and substitutes the value here at build time. The
-  // literal below is a placeholder; an unsubstituted placeholder failing
-  // a sha256 length check at startup is the intended fail-closed signal.
+  // `make -C worker`) and computes sha256 of `worker/seccomp_load.py`,
+  // substituting both values at build time. Literals below are
+  // placeholders; an unsubstituted placeholder failing a sha256 length
+  // check at startup is the intended fail-closed signal. The dual pin
+  // closes the substitution-attack window where an attacker swaps the
+  // loader (which calls prctl(PR_SET_SECCOMP)) for a no-op while leaving
+  // the filter blob unchanged.
   worker: {
     seccompFilterPath: "./worker/seccomp_filter.bpf",
     seccompFilterSha256: "__PLA114_SECCOMP_FILTER_SHA256__",
+    seccompLoaderPath: "./worker/seccomp_load.py",
+    seccompLoaderSha256: "__PLA114_SECCOMP_LOADER_SHA256__",
   },
 
   // instanceConfigSchema — ties secret-scope strictly to githubPatSecretId
