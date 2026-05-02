@@ -152,7 +152,6 @@ jobs:
           exec 3<worker/seccomp_filter.bpf
           bwrap \
             --unshare-all \
-            --share-net=false \
             --die-with-parent \
             --new-session \
             --clearenv \

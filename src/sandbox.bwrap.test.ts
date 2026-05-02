@@ -540,7 +540,7 @@ describe.skipIf(!HAS_BWRAP)("PLA-114 §4 — bwrap+seccomp integration matrix", 
   // -------------------------------------------------------------------------
 
   describe("PLA-73 ACs — reverified at kernel boundary", () => {
-    it("AC2: no TCP listener (structural — argv has --share-net=false)", () => {
+    it("AC2: no TCP listener (structural — argv has --unshare-all → fresh netns)", () => {
       // The spawn-mode decision and buildSpawnInvocation are pure; we
       // verify the bwrap argv pattern in unit tests in
       // src/cad-worker-client.test.ts. Here we just sanity-check the
