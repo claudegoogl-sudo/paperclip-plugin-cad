@@ -37,6 +37,19 @@ jobs:
           bwrap --version
           pkg-config --modversion libseccomp
 
+      - name: Allow unprivileged user namespaces (GHA Ubuntu 24.04 workaround)
+        run: |
+          # Ubuntu 24.04 ships with kernel.apparmor_restrict_unprivileged_userns=1,
+          # which blocks netlink RTM_NEWADDR inside an unprivileged user
+          # namespace. bwrap's --unshare-net codepath calls loopback_setup()
+          # which fails with EPERM on the GHA runner. Flip the sysctl off so
+          # bwrap can bring up `lo` inside the sandbox netns. This affects only
+          # the runner kernel for the duration of the job; production hosts
+          # have CAP_NET_ADMIN at the bwrap layer and don't need this.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          # Same setting under unprivileged_userns_clone (older kernels):
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
