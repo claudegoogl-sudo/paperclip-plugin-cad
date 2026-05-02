@@ -269,7 +269,12 @@ export function selectSpawnMode(
     );
   }
   const v = bwrapVersionOf(bwrapPath);
-  const native = v != null && (v.major > 0 || (v.major === 0 && v.minor >= 6));
+  // NOTE: upstream bubblewrap (through 0.9.0, the version Ubuntu 24.04 ships)
+  // does NOT expose --rlimit-* flags despite older docs that suggested they
+  // landed in 0.6. Empirical evidence: bwrap 0.9.0 emits
+  // 'bwrap: Unknown option --rlimit-as'. Until a future bubblewrap release
+  // genuinely adds them, always take the cad_preexec fallback path.
+  const native = false;
 
   // (4) preexec fallback path is required when bwrap is older.
   if (!native && !existsSync(PREEXEC_PATH)) {
