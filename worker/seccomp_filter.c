@@ -235,7 +235,19 @@ int main(void)
     kill_syscall(ctx, "vmsplice");
     kill_syscall(ctx, "migrate_pages");
     kill_syscall(ctx, "move_pages");
-    kill_syscall(ctx, "mbind");
+    /* PLA-106 spec rev 5 (7d47d5a3) §2: mbind action change
+     * KILL_PROCESS -> ERRNO(EPERM). Numpy/OCP emit advisory
+     * mbind(..., MPOL_PREFERRED, ...) NUMA hints on the CadQuery import
+     * path (CI run 25259321581 Phase C dmesg + local strace reproduction).
+     * EPERM is no weaker than SIGSYS for the attacker (zero-effect syscall
+     * either way) but lets benign callers fall back gracefully. The
+     * dangerous MPOL_* modes already EPERM under our cap-drop posture
+     * (no CAP_SYS_NICE); ERRNO uniforms that across the full mode set.
+     *
+     * Peer LPE primitives (vmsplice, migrate_pages, move_pages) explicitly
+     * stay KILL_PROCESS per CTO endorsement cdd124fd: no observed legit
+     * caller, LPE-primitive nature unchanged. */
+    seccomp_rule_add(ctx, SCMP_ACT_ERRNO(EPERM), SCMP_SYS(mbind), 0);
     /* personality(): kill only when arg != 0. arg=0 is a benign "what
      * personality am I?" query that some libc implementations issue at
      * startup. The spec lists this as conditional. */

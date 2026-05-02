@@ -21,10 +21,13 @@
 
 import { describe, it, expect, beforeAll, afterEach } from "vitest";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { mkdtemp, access } from "node:fs/promises";
 import { constants, existsSync } from "node:fs";
 import { execSync, spawn } from "node:child_process";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 import {
   invokeWorker,
@@ -622,6 +625,176 @@ describe.skipIf(!HAS_BWRAP)("PLA-114 §4 — bwrap+seccomp integration matrix", 
       expect(result.signal).not.toBe("SIGSYS");
       expect(result.code).toBe(0);
       expect(result.stdout).toMatch(/NEW16:ptrace_rc=/);
+    }, T);
+
+    it("NEW17: production startup is in §2 survive-set (necessary, not sufficient)", async () => {
+      // Per spec rev 5 (7d47d5a3) §4: run the full production argv
+      // (bwrap + python -c bootstrap + cad_worker.main()) against an
+      // empty-script JSON job under strace; assert exit cleanly AND no
+      // §2 KILL_PROCESS-action syscall name appears in the strace tail.
+      //
+      // NECESSARY, NOT SUFFICIENT. Does not prove the sandbox is
+      // secure. Proves the §2 denylist hasn't drifted out of sync with
+      // the production CadQuery/OCP/numpy import path. Catches the
+      // rev-5-class miss (numpy emitting `mbind(..., MPOL_PREFERRED, ...)`
+      // on the import path — CI run 25259321581 Phase C) at test time
+      // with the offending syscall name in the strace tail, before CI
+      // smoke fails. Pairs with NEW1–NEW15 negative controls which
+      // assert the same syscalls DO die under the real loader.
+
+      // §2 KILL_PROCESS-action syscall names. `mbind` is intentionally
+      // EXCLUDED — rev 5 downgraded it to ERRNO(EPERM) so numpy's
+      // MPOL_PREFERRED hint doesn't crash production. Peer LPE
+      // primitives (vmsplice / migrate_pages / move_pages) stay killed
+      // per CTO endorsement cdd124fd.
+      const KILL_SYSCALLS = [
+        "execve", "execveat",
+        "fork", "vfork",
+        "ptrace", "unshare",
+        "mount", "umount2", "pivot_root", "chroot",
+        "swapon", "swapoff", "reboot",
+        "init_module", "finit_module", "delete_module",
+        "kexec_load", "kexec_file_load",
+        "bpf", "perf_event_open", "userfaultfd",
+        "process_vm_readv", "process_vm_writev",
+        "pidfd_send_signal",
+        "pkey_alloc", "pkey_free", "pkey_mprotect",
+        "iopl", "ioperm",
+        "name_to_handle_at", "open_by_handle_at",
+        "vmsplice", "migrate_pages", "move_pages",
+        "nfsservctl",
+        "io_uring_setup", "io_uring_register", "io_uring_enter",
+      ];
+
+      // High-volume benign syscalls excluded so the strace tail stays
+      // human-readable and focused on §2 hits. CTO comment cdd124fd:
+      // "NEW17 strace allowlist construction is Coder's call". The
+      // assertion shape (no §2 syscall name in tail) is what matters,
+      // not the exact exclusion list.
+      const BENIGN_EXCLUDE = [
+        "read", "write", "close", "openat", "newfstatat", "fstat",
+        "lseek", "mmap", "munmap", "mprotect", "brk",
+        "rt_sigaction", "rt_sigprocmask", "rt_sigreturn",
+        "futex", "set_robust_list", "set_tid_address", "rseq",
+        "getuid", "geteuid", "getgid", "getegid", "getpid", "gettid",
+        "ioctl", "lstat", "stat", "access", "faccessat", "faccessat2",
+        "readlink", "readlinkat", "getdents64",
+        "pread64", "pwrite64",
+        "select", "poll", "epoll_create1", "epoll_ctl", "epoll_wait",
+        "clock_gettime", "clock_nanosleep", "nanosleep",
+        "getrandom", "uname", "sysinfo", "prlimit64", "arch_prctl",
+        "wait4", "exit_group", "exit",
+        "sched_yield", "sched_getaffinity", "sched_setaffinity",
+        "dup", "dup2", "dup3", "pipe", "pipe2",
+        "fcntl", "flock",
+        "getcwd", "chdir", "fchdir",
+        "membarrier", "madvise",
+        "clone", "clone3",  // covered by NEW2/NEW14/NEW15
+      ].join(",");
+
+      const filterPath = DECISION.seccompFilterPath!;
+      const loaderPath = DECISION.seccompLoaderPath!;
+      const bwrap = DECISION.bwrapPath!;
+      const workdir = await freshWorkdir();
+
+      // Production bootstrap shape — must match PYTHON_BOOTSTRAP in
+      // src/cad-worker-client.ts. The spec calls for "import cad_worker;
+      // cad_worker.main()" — main() reads one JSON job from stdin and
+      // exits.
+      const bootstrap = [
+        "import sys",
+        "sys.path.insert(0, '/sandbox')",
+        "from seccomp_load import lock_down",
+        "lock_down('/sandbox/seccomp_filter.bpf')",
+        "import cad_worker",
+        "cad_worker.main()",
+      ].join("; ");
+
+      // Production-shape bwrap argv. cad_worker.py is mounted under
+      // /sandbox via --ro-bind. Path resolved via DECISION-adjacent
+      // module-relative discovery (mirroring buildSpawnInvocation).
+      const workerPyPath = join(__dirname, "cad_worker.py");
+
+      const bwrapArgs: string[] = [
+        "--unshare-all",
+        "--die-with-parent",
+        "--new-session",
+        "--clearenv",
+        "--setenv", "PATH", "/usr/bin:/bin",
+        "--setenv", "PYTHONDONTWRITEBYTECODE", "1",
+        "--setenv", "PYTHONUNBUFFERED", "1",
+        "--uid", "65534", "--gid", "65534",
+        "--hostname", "cad-worker",
+        "--proc", "/proc",
+        "--dev", "/dev",
+        "--ro-bind", "/usr", "/usr",
+        "--ro-bind", "/lib", "/lib",
+        "--ro-bind", "/lib64", "/lib64",
+        "--ro-bind", "/bin", "/bin",
+        "--ro-bind", "/etc/ld.so.cache", "/etc/ld.so.cache",
+        "--ro-bind", filterPath, "/sandbox/seccomp_filter.bpf",
+        "--ro-bind", loaderPath, "/sandbox/seccomp_load.py",
+        "--ro-bind", workerPyPath, "/sandbox/cad_worker.py",
+        "--tmpfs", "/tmp",
+        "--bind", workdir, workdir,
+        "--chdir", workdir,
+        "--cap-drop", "ALL",
+        "--", "/usr/bin/python3", "-c", bootstrap,
+      ];
+
+      const result = await new Promise<{
+        code: number | null;
+        signal: NodeJS.Signals | null;
+        stdout: string;
+        stderr: string;
+      }>((resolve) => {
+        const child = spawn(
+          "strace",
+          ["-f", "-e", `trace=!${BENIGN_EXCLUDE}`, bwrap, ...bwrapArgs],
+          { stdio: ["pipe", "pipe", "pipe"] },
+        );
+        let stdout = "";
+        let stderr = "";
+        child.stdout?.on("data", (b: Buffer) => { stdout += b.toString("utf8"); });
+        child.stderr?.on("data", (b: Buffer) => { stderr += b.toString("utf8"); });
+        // Empty-script JSON job. cad_worker.main() reads all of stdin,
+        // parses one JSON request, processes the (empty) script,
+        // writes a response, exits 0 (success) or 1 (script-error
+        // envelope). Both prove no §2 syscall crossed the import path.
+        child.stdin?.write(JSON.stringify({ script: "", format: "step", workdir }) + "\n");
+        child.stdin?.end();
+        child.on("close", (code, signal) => resolve({ code, signal, stdout, stderr }));
+      });
+
+      // Assertion 1: no kernel kill during startup. SIGSYS here is the
+      // rev-5-class regression we're guarding against.
+      expect(result.signal).not.toBe("SIGSYS");
+      // Exit 0 (success) or 1 (script-error JSON envelope) is fine —
+      // the empty script may produce either depending on cad_worker
+      // semantics; both prove startup completed without a §2 hit.
+      expect([0, 1]).toContain(result.code);
+
+      // Assertion 2: no §2 KILL_PROCESS syscall name in the strace
+      // tail. If a future production import grows a syscall that
+      // crosses §2, the offending name appears here with strace's
+      // standard `<name>(...)` format. We surface it loudly with the
+      // tail attached so the operator can correlate to the §2 row that
+      // needs reclassifying (rev-5-class deviation, requires CTO
+      // endorsement) or fix the import path.
+      const offending: string[] = [];
+      for (const sc of KILL_SYSCALLS) {
+        const re = new RegExp(`\\b${sc}\\(`);
+        if (re.test(result.stderr)) offending.push(sc);
+      }
+      if (offending.length > 0) {
+        throw new Error(
+          `NEW17 regression: production startup crossed §2 KILL_PROCESS ` +
+          `syscall(s) ${JSON.stringify(offending)}. Either reclassify the ` +
+          `§2 row(s) (rev-5-class deviation, requires CTO endorsement) ` +
+          `or fix the import path. strace tail (last 4kb): ` +
+          result.stderr.slice(-4096),
+        );
+      }
     }, T);
   });
 
