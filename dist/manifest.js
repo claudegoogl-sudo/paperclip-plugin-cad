@@ -21,8 +21,23 @@ var manifest = {
   entrypoints: {
     worker: "./dist/worker.js"
   },
+  // PLA-114 §5.2 — host-side kernel-sandbox capability negotiation.
+  runtimeRequirements: {
+    kernelSandbox: "bubblewrap"
+  },
+  // PLA-114 acceptance — pin the seccomp filter blob digest. The build
+  // script reads `worker/seccomp_filter.bpf.sha256` (produced by
+  // `make -C worker`) and substitutes the value here at build time. The
+  // literal below is a placeholder; an unsubstituted placeholder failing
+  // a sha256 length check at startup is the intended fail-closed signal.
+  worker: {
+    seccompFilterPath: "./worker/seccomp_filter.bpf",
+    seccompFilterSha256: "__PLA114_SECCOMP_FILTER_SHA256__"
+  },
   // instanceConfigSchema — ties secret-scope strictly to githubPatSecretId
   // (PLA-41 remediation #2). Fields validated by the host before plugin load.
+  // PLA-74 F3: additionalProperties:false so unknown keys are rejected at host
+  // load time rather than silently ignored (fail-closed).
   instanceConfigSchema: {
     type: "object",
     properties: {
@@ -40,7 +55,8 @@ var manifest = {
         description: "Branch to commit artifacts to. Defaults to 'main'."
       }
     },
-    required: ["githubPatSecretId"]
+    required: ["githubPatSecretId"],
+    additionalProperties: false
   },
   // v0.1.0 tool surface — operator-confirmed via approval f420bc31 (2026-05-01).
   tools: [
@@ -84,18 +100,25 @@ var manifest = {
           },
           paperclipTicketId: {
             type: "string",
+            // PLA-74 F1/F2 — allowlist regex; rejects path traversal and
+            // commit-message injection at the host's schema-validation gate.
+            pattern: "^[A-Z][A-Z0-9]{1,9}-[0-9]{1,9}$",
             description: "Paperclip ticket ID (e.g. PLA-56). Used in artifact path and commit message."
           },
           toolCallId: {
             type: "string",
+            pattern: "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
             description: "Unique ID for this tool call. Used for deterministic artifact path and idempotency."
           },
           filename: {
             type: "string",
+            pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
             description: "Optional artifact filename. Defaults to 'artifact.<format>'."
           }
         },
-        required: ["artifactId", "format", "paperclipTicketId", "toolCallId"]
+        required: ["artifactId", "format", "paperclipTicketId", "toolCallId"],
+        // PLA-74 F3 — fail-closed on unknown fields; matches cad:run_script.
+        additionalProperties: false
       }
     }
   ]

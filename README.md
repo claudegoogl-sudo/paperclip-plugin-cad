@@ -22,13 +22,19 @@ Tool call: cad:run_script
 }
 → { "artifactId": "cad-artifact-a1b2c3d4", "summary": "Box 1×1×1 mm" }
 
-# Export the staged artifact to STEP format
+# Export the staged artifact and commit it to the configured GitHub artifact repo
 Tool call: cad:export
 {
   "artifactId": "cad-artifact-a1b2c3d4",
-  "format": "step"
+  "format": "step",
+  "paperclipTicketId": "PLA-32",
+  "toolCallId": "tc-1234"
 }
-→ { "filePath": "/var/paperclip/artifacts/cad-artifact-a1b2c3d4.step" }
+→ {
+    "commitSha": "abc123def456...",
+    "permalink": "https://github.com/<owner>/<repo>/blob/abc123def456.../artifacts/PLA-32/tc-1234/artifact.step",
+    "artifactPath": "artifacts/PLA-32/tc-1234/artifact.step"
+  }
 ```
 
 ## Security defaults

@@ -1,38 +1,267 @@
 // src/worker.ts
 import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
+import * as path from "node:path";
 
 // src/cad-worker-client.ts
 import { spawn } from "node:child_process";
 import { mkdtemp } from "node:fs/promises";
+import { existsSync, openSync, closeSync, statSync } from "node:fs";
 import { tmpdir as tmpdir2 } from "node:os";
 import { join as join2, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { execSync } from "node:child_process";
 
 // src/stub-cad-worker.ts
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+var CadWorkerInternalError = class extends Error {
+  code = "worker_internal";
+  constructor(message) {
+    super(message);
+    this.name = "CadWorkerInternalError";
+  }
+};
 var ARTIFACT_STAGING_DIR = join(tmpdir(), "paperclip-cad-staging");
 
 // src/cad-worker-client.ts
 var GRACE_SECONDS = 5;
+var BWRAP_OVERHEAD_GRACE_MS = 100;
 var MAX_TIMEOUT_SECONDS = 300;
 var DEFAULT_TIMEOUT_SECONDS = 30;
 var __filename = fileURLToPath(import.meta.url);
 var __dirname = dirname(__filename);
 var WORKER_PY = join2(__dirname, "cad_worker.py");
-async function invokeWorker(job, timeoutSeconds, pythonBin = "python3") {
-  return new Promise((resolve) => {
-    const child = spawn(pythonBin, [WORKER_PY], {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: {
-        // Minimal environment to reduce attack surface.
-        // PYTHONDONTWRITEBYTECODE: avoids .pyc files in the workdir.
-        // PYTHONUNBUFFERED: ensures stdout is flushed immediately.
-        PATH: "/usr/bin:/bin",
-        PYTHONDONTWRITEBYTECODE: "1",
-        PYTHONUNBUFFERED: "1"
-      }
+var SECCOMP_FILTER_PATH = join2(__dirname, "..", "worker", "seccomp_filter.bpf");
+var PREEXEC_PATH = join2(__dirname, "..", "worker", "cad_preexec");
+function defaultRlimits(timeoutSeconds) {
+  return {
+    asBytes: 2 * 1024 ** 3,
+    nproc: 64,
+    nofile: 256,
+    fsizeBytes: 256 * 1024 ** 2,
+    cpuSeconds: timeoutSeconds + 5,
+    coreBytes: 0
+  };
+}
+function which(bin) {
+  try {
+    const out = execSync(`command -v ${bin}`, {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
+    return out || null;
+  } catch {
+    return null;
+  }
+}
+function bwrapVersionOf(bwrapPath) {
+  try {
+    const out = execSync(`${bwrapPath} --version`, {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
+    const m = /(\d+)\.(\d+)/.exec(out);
+    if (!m) return null;
+    return { major: Number(m[1]), minor: Number(m[2]) };
+  } catch {
+    return null;
+  }
+}
+function selectSpawnMode(env = process.env, platform = process.platform) {
+  const unsafeDev = env.CAD_WORKER_UNSAFE_DEV === "1";
+  const isProd = env.NODE_ENV === "production";
+  if (unsafeDev && !isProd) {
+    return { mode: "dev_direct" };
+  }
+  if (platform !== "linux") {
+    throw new CadWorkerInternalError(
+      "Option B sandbox unavailable: requires Linux + bwrap. Set CAD_WORKER_UNSAFE_DEV=1 (NODE_ENV must NOT be 'production') to run with the in-process layer only on developer machines."
+    );
+  }
+  const bwrapPath = which("bwrap");
+  if (!bwrapPath) {
+    throw new CadWorkerInternalError(
+      "Option B sandbox unavailable: 'bwrap' not on PATH. Install bubblewrap on the deploy host (apt-get install bubblewrap). Set CAD_WORKER_UNSAFE_DEV=1 (non-production only) to run direct."
+    );
+  }
+  if (!existsSync(SECCOMP_FILTER_PATH)) {
+    throw new CadWorkerInternalError(
+      `Option B sandbox unavailable: seccomp filter blob not found at ${SECCOMP_FILTER_PATH}. Build it with \`make -C worker seccomp_filter.bpf\` (requires libseccomp-dev).`
+    );
+  }
+  const v = bwrapVersionOf(bwrapPath);
+  const native = v != null && (v.major > 0 || v.major === 0 && v.minor >= 6);
+  if (!native && !existsSync(PREEXEC_PATH)) {
+    throw new CadWorkerInternalError(
+      `bwrap ${v?.major}.${v?.minor} predates --rlimit-* (need 0.6+). Build the preexec wrapper with \`make -C worker cad_preexec\`, or upgrade bubblewrap on the deploy host.`
+    );
+  }
+  return {
+    mode: "bwrap+seccomp",
+    bwrapPath,
+    bwrapVersion: v ?? void 0,
+    bwrapHasNativeRlimits: native,
+    seccompFilterPath: SECCOMP_FILTER_PATH,
+    preexecPath: native ? void 0 : PREEXEC_PATH
+  };
+}
+function buildSpawnInvocation(opts) {
+  const pythonBin = opts.pythonBin ?? "python3";
+  const env = {
+    PATH: "/usr/bin:/bin",
+    PYTHONDONTWRITEBYTECODE: "1",
+    PYTHONUNBUFFERED: "1"
+  };
+  if (opts.decision.mode === "dev_direct") {
+    return {
+      command: pythonBin,
+      args: [WORKER_PY],
+      env,
+      stdio: ["pipe", "pipe", "pipe"]
+    };
+  }
+  if (opts.seccompFd === void 0) {
+    throw new CadWorkerInternalError(
+      "buildSpawnInvocation(bwrap+seccomp): seccompFd is required"
+    );
+  }
+  const bwrap = opts.decision.bwrapPath;
+  const venvPython = pythonBin;
+  const args = [
+    "--unshare-all",
+    "--share-net=false",
+    "--die-with-parent",
+    "--new-session",
+    "--clearenv",
+    "--setenv",
+    "PATH",
+    "/usr/bin:/bin",
+    "--setenv",
+    "HOME",
+    "/tmp",
+    "--setenv",
+    "LANG",
+    "C.UTF-8",
+    "--setenv",
+    "PYTHONDONTWRITEBYTECODE",
+    "1",
+    "--setenv",
+    "PYTHONHASHSEED",
+    "random",
+    "--setenv",
+    "PYTHONUNBUFFERED",
+    "1",
+    "--uid",
+    "65534",
+    "--gid",
+    "65534",
+    "--hostname",
+    "cad-worker",
+    "--proc",
+    "/proc",
+    "--dev",
+    "/dev",
+    "--ro-bind",
+    "/usr",
+    "/usr",
+    "--ro-bind",
+    "/lib",
+    "/lib",
+    "--ro-bind",
+    "/lib64",
+    "/lib64",
+    "--ro-bind",
+    "/bin",
+    "/bin",
+    "--ro-bind",
+    "/etc/ld.so.cache",
+    "/etc/ld.so.cache",
+    "--ro-bind",
+    WORKER_PY,
+    WORKER_PY,
+    "--tmpfs",
+    "/tmp",
+    "--bind",
+    opts.workdir,
+    opts.workdir,
+    "--chdir",
+    opts.workdir,
+    "--cap-drop",
+    "ALL",
+    // Filter FD: the parent-side FD lives at child FD 3 (first `stdio` extra).
+    "--seccomp",
+    "3"
+  ];
+  if (opts.decision.bwrapHasNativeRlimits) {
+    args.push(
+      "--rlimit-as",
+      String(opts.rlimits.asBytes),
+      "--rlimit-nproc",
+      String(opts.rlimits.nproc),
+      "--rlimit-nofile",
+      String(opts.rlimits.nofile),
+      "--rlimit-fsize",
+      String(opts.rlimits.fsizeBytes),
+      "--rlimit-cpu",
+      String(opts.rlimits.cpuSeconds),
+      "--rlimit-core",
+      String(opts.rlimits.coreBytes)
+    );
+    args.push("--", venvPython, WORKER_PY);
+  } else {
+    const preexec = opts.decision.preexecPath;
+    args.push("--ro-bind", preexec, preexec);
+    args.push("--setenv", "CAD_PREEXEC_RLIMIT_AS", String(opts.rlimits.asBytes));
+    args.push("--setenv", "CAD_PREEXEC_RLIMIT_NPROC", String(opts.rlimits.nproc));
+    args.push("--setenv", "CAD_PREEXEC_RLIMIT_NOFILE", String(opts.rlimits.nofile));
+    args.push("--setenv", "CAD_PREEXEC_RLIMIT_FSIZE", String(opts.rlimits.fsizeBytes));
+    args.push("--setenv", "CAD_PREEXEC_RLIMIT_CPU", String(opts.rlimits.cpuSeconds));
+    args.push("--setenv", "CAD_PREEXEC_RLIMIT_CORE", String(opts.rlimits.coreBytes));
+    args.push("--", preexec, venvPython, WORKER_PY);
+  }
+  const stdio = [
+    "pipe",
+    "pipe",
+    "pipe",
+    { type: "fd", fd: opts.seccompFd }
+  ];
+  return {
+    command: bwrap,
+    args,
+    env,
+    stdio
+  };
+}
+async function invokeWorker(job, timeoutSeconds, decision = selectSpawnMode(), pythonBin = "python3") {
+  const rlimits = defaultRlimits(timeoutSeconds);
+  let seccompFd;
+  if (decision.mode === "bwrap+seccomp") {
+    seccompFd = openSync(decision.seccompFilterPath, "r");
+  }
+  let invocation;
+  try {
+    invocation = buildSpawnInvocation({
+      decision,
+      workdir: job.workdir,
+      pythonBin,
+      seccompFd,
+      rlimits
     });
+  } catch (err) {
+    if (seccompFd !== void 0) closeSync(seccompFd);
+    throw err;
+  }
+  return new Promise((resolve) => {
+    const child = spawn(invocation.command, invocation.args, {
+      stdio: invocation.stdio,
+      env: invocation.env
+    });
+    if (seccompFd !== void 0) {
+      try {
+        closeSync(seccompFd);
+      } catch {
+      }
+    }
     let stdout = "";
     let stderr = "";
     let settled = false;
@@ -43,6 +272,7 @@ async function invokeWorker(job, timeoutSeconds, pythonBin = "python3") {
       if (killTimer !== null) clearTimeout(killTimer);
       resolve(result);
     };
+    const overheadMs = decision.mode === "bwrap+seccomp" ? BWRAP_OVERHEAD_GRACE_MS : 0;
     killTimer = setTimeout(() => {
       if (settled) return;
       settled = true;
@@ -55,35 +285,67 @@ async function invokeWorker(job, timeoutSeconds, pythonBin = "python3") {
         error: "worker_timeout",
         message: `CAD script timed out after ${timeoutSeconds}s`
       });
-    }, (timeoutSeconds + GRACE_SECONDS) * 1e3);
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString("utf8");
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString("utf8");
-    });
-    child.on("close", (_code) => {
+    }, timeoutSeconds * 1e3 + overheadMs + GRACE_SECONDS * 1e3);
+    if (child.stdout) {
+      child.stdout.on("data", (chunk) => {
+        stdout += chunk.toString("utf8");
+      });
+    }
+    if (child.stderr) {
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk.toString("utf8");
+      });
+    }
+    child.on("close", (code, signal) => {
       if (settled) return;
       if (killTimer !== null) clearTimeout(killTimer);
+      if (signal === "SIGSYS") {
+        settle({
+          ok: false,
+          error: "sandbox_violation",
+          message: `Worker killed by seccomp (SIGSYS). stderr: ${stderr.slice(0, 500)}`,
+          exitSignal: signal,
+          exitCode: code
+        });
+        return;
+      }
+      if (signal === "SIGKILL" && /seccomp/i.test(stderr)) {
+        settle({
+          ok: false,
+          error: "sandbox_violation",
+          message: `Worker killed by kernel (SIGKILL with seccomp audit line). stderr: ${stderr.slice(0, 500)}`,
+          exitSignal: signal,
+          exitCode: code
+        });
+        return;
+      }
       const line = stdout.trim();
       if (!line) {
         settle({
           ok: false,
           error: "worker_internal",
-          message: `Worker produced no output on stdout. stderr: ${stderr.slice(0, 500)}`
+          message: `Worker produced no output on stdout. code=${code} signal=${signal} stderr: ${stderr.slice(0, 500)}`,
+          exitSignal: signal,
+          exitCode: code
         });
         return;
       }
       const newlineIdx = line.indexOf("\n");
       const firstLine = newlineIdx === -1 ? line : line.slice(0, newlineIdx);
       try {
-        const result = JSON.parse(firstLine);
-        settle(result);
+        const parsed = JSON.parse(firstLine);
+        if (!parsed.ok) {
+          parsed.exitSignal = signal;
+          parsed.exitCode = code;
+        }
+        settle(parsed);
       } catch {
         settle({
           ok: false,
           error: "worker_internal",
-          message: `Worker output was not valid JSON: ${firstLine.slice(0, 200)}`
+          message: `Worker output was not valid JSON: ${firstLine.slice(0, 200)}`,
+          exitSignal: signal,
+          exitCode: code
         });
       }
     });
@@ -95,24 +357,29 @@ async function invokeWorker(job, timeoutSeconds, pythonBin = "python3") {
       });
     });
     const jobJson = JSON.stringify(job);
-    child.stdin.write(jobJson, "utf8", () => {
-      child.stdin.end();
-    });
+    if (child.stdin) {
+      child.stdin.write(jobJson, "utf8", () => {
+        child.stdin?.end();
+      });
+    }
   });
 }
-async function renderCadQuery(script, format, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+async function renderCadQuery(script, format, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS, decision = selectSpawnMode()) {
   const effectiveTimeout = Math.min(
     Math.max(1, timeoutSeconds),
     MAX_TIMEOUT_SECONDS
   );
   const workdir = await mkdtemp(join2(tmpdir2(), "cad-worker-"));
-  return invokeWorker({ script, format, workdir }, effectiveTimeout);
+  return invokeWorker({ script, format, workdir }, effectiveTimeout, decision);
 }
 
 // src/worker.ts
 var DEFAULT_ARTIFACT_REPO_URL = "https://github.com/claudegoogl-sudo/cad-artifacts.git";
 var DEFAULT_ARTIFACT_BRANCH = "main";
 var artifactStagingMap = /* @__PURE__ */ new Map();
+function stagingMapKey(companyId, agentId, artifactId) {
+  return `${companyId}:${agentId}:${artifactId}`;
+}
 var PushError = class extends Error {
   kind;
   httpStatus;
@@ -143,6 +410,43 @@ function logCompletion(ctx, tool, runCtx, durationMs, status) {
     durationMs
   });
 }
+var TICKET_ID_RE = /^[A-Z][A-Z0-9]{1,9}-[0-9]{1,9}$/;
+var TOOL_CALL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+var FILENAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+function validateTicketId(value) {
+  if (!TICKET_ID_RE.test(value)) {
+    return "paperclipTicketId must match ^[A-Z][A-Z0-9]{1,9}-[0-9]{1,9}$ (e.g. PLA-56)";
+  }
+  return null;
+}
+function validateToolCallId(value) {
+  if (!TOOL_CALL_ID_RE.test(value)) {
+    return "toolCallId must match ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$";
+  }
+  return null;
+}
+function validateFilename(value) {
+  if (value.startsWith(".") || value.includes("..")) {
+    return "filename must not start with '.' or contain '..'";
+  }
+  if (!FILENAME_RE.test(value)) {
+    return "filename must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$";
+  }
+  return null;
+}
+function assertSafeRepoPath(repoPath) {
+  const normalized = path.posix.normalize(repoPath);
+  if (normalized !== repoPath) return "internal: repoPath would normalize differently (path traversal blocked)";
+  if (!normalized.startsWith("artifacts/")) return "internal: repoPath must start with 'artifacts/'";
+  return null;
+}
+function encodeRepoPathForUrl(repoPath) {
+  return repoPath.split("/").map(encodeURIComponent).join("/");
+}
+var FETCH_TIMEOUT_MS = 3e4;
+function fetchSignal() {
+  return AbortSignal.timeout(FETCH_TIMEOUT_MS);
+}
 function githubHeaders(pat) {
   return {
     Authorization: `Bearer ${pat}`,
@@ -153,16 +457,33 @@ function githubHeaders(pat) {
   };
 }
 function parseGitHubUrl(repoUrl) {
-  const match = repoUrl.match(/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/);
-  if (!match) throw new PushError("prerequisite_missing", `Cannot parse GitHub URL: ${repoUrl}`);
-  return [match[1], match[2]];
+  let u;
+  try {
+    u = new URL(repoUrl);
+  } catch {
+    throw new PushError("prerequisite_missing", `Cannot parse GitHub URL: ${repoUrl}`);
+  }
+  if (u.protocol !== "https:" || u.host !== "github.com") {
+    throw new PushError(
+      "prerequisite_missing",
+      `artifactRepoUrl must be an https://github.com/<owner>/<repo>(.git) URL. Got: ${repoUrl}`
+    );
+  }
+  const segs = u.pathname.replace(/^\/+/, "").replace(/\.git\/?$/, "").replace(/\/+$/, "").split("/");
+  if (segs.length !== 2 || !segs[0] || !segs[1]) {
+    throw new PushError("prerequisite_missing", `Cannot parse owner/repo from ${repoUrl}`);
+  }
+  return [segs[0], segs[1]];
 }
 async function checkRepoPrerequisite(pat, repoUrl) {
   const [owner, repo] = parseGitHubUrl(repoUrl);
   const headers = githubHeaders(pat);
   let resp;
   try {
-    resp = await fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers });
+    resp = await fetch(
+      `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
+      { headers, signal: fetchSignal() }
+    );
   } catch (err) {
     throw new PushError("network", `Network error reaching ${owner}/${repo}: ${err.message}`);
   }
@@ -192,9 +513,15 @@ async function checkArtifactExists(pat, repoUrl, repoPath) {
     return null;
   }
   const headers = githubHeaders(pat);
+  const encodedPath = encodeRepoPathForUrl(repoPath);
+  const ownerEnc = encodeURIComponent(owner);
+  const repoEnc = encodeURIComponent(repo);
   let contentsResp;
   try {
-    contentsResp = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${repoPath}`, { headers });
+    contentsResp = await fetch(
+      `https://api.github.com/repos/${ownerEnc}/${repoEnc}/contents/${encodedPath}`,
+      { headers, signal: fetchSignal() }
+    );
   } catch {
     return null;
   }
@@ -202,8 +529,8 @@ async function checkArtifactExists(pat, repoUrl, repoPath) {
   const contentsData = await contentsResp.json();
   try {
     const commitResp = await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/commits?path=${encodeURIComponent(repoPath)}&per_page=1`,
-      { headers }
+      `https://api.github.com/repos/${ownerEnc}/${repoEnc}/commits?path=${encodeURIComponent(repoPath)}&per_page=1`,
+      { headers, signal: fetchSignal() }
     );
     if (commitResp.ok) {
       const commits = await commitResp.json();
@@ -221,12 +548,13 @@ async function pushArtifactToGitHub(pat, repoUrl, branch, localFile, repoPath, m
   const [owner, repo] = parseGitHubUrl(repoUrl);
   const { readFile } = await import("node:fs/promises");
   const contentBase64 = (await readFile(localFile)).toString("base64");
-  const apiBase = `https://api.github.com/repos/${owner}/${repo}/contents/${repoPath}`;
+  const encodedPath = encodeRepoPathForUrl(repoPath);
+  const apiBase = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodedPath}`;
   const headers = githubHeaders(pat);
   let existingSha;
   let getResp;
   try {
-    getResp = await fetch(apiBase, { headers });
+    getResp = await fetch(apiBase, { headers, signal: fetchSignal() });
   } catch (err) {
     throw new PushError("network", `Network error fetching ${repoPath}: ${err.message}`);
   }
@@ -241,7 +569,7 @@ async function pushArtifactToGitHub(pat, repoUrl, branch, localFile, repoPath, m
   if (existingSha) body.sha = existingSha;
   let putResp;
   try {
-    putResp = await fetch(apiBase, { method: "PUT", headers, body: JSON.stringify(body) });
+    putResp = await fetch(apiBase, { method: "PUT", headers, body: JSON.stringify(body), signal: fetchSignal() });
   } catch (err) {
     throw new PushError("network", `Network error pushing ${repoPath}: ${err.message}`);
   }
@@ -314,6 +642,13 @@ var plugin = definePlugin({
         }
         const script = p.script;
         const timeoutSeconds = typeof p.timeout === "number" ? p.timeout : DEFAULT_TIMEOUT_SECONDS;
+        if (typeof runCtx.companyId !== "string" || runCtx.companyId.length === 0 || typeof runCtx.agentId !== "string" || runCtx.agentId.length === 0) {
+          ctx.logger.warn("cad:run_script: missing tenant context on runCtx");
+          const ms2 = Date.now() - t0;
+          await emitMetrics(anyCtx, tool, ms2, true);
+          logCompletion(ctx, tool, runCtx, ms2, "error");
+          return validationError("missing tenant context (companyId/agentId) on runCtx");
+        }
         ctx.logger.info("cad:run_script: rendering", { scriptLength: script.length, timeoutSeconds });
         let stepPath;
         try {
@@ -327,7 +662,10 @@ var plugin = definePlugin({
           return workerInternalError(msg);
         }
         const artifactId = `cad-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        artifactStagingMap.set(artifactId, { script, stepPath });
+        artifactStagingMap.set(
+          stagingMapKey(runCtx.companyId, runCtx.agentId, artifactId),
+          { script, stepPath }
+        );
         ctx.logger.info("cad:run_script: staged", { artifactId });
         const ms = Date.now() - t0;
         await emitMetrics(anyCtx, tool, ms, false);
@@ -348,11 +686,24 @@ var plugin = definePlugin({
           properties: {
             artifactId: { type: "string", description: "Artifact ID from cad:run_script." },
             format: { type: "string", enum: ["step", "stl", "3mf"], description: "Output format." },
-            paperclipTicketId: { type: "string", description: "Paperclip ticket ID for path/commit message." },
-            toolCallId: { type: "string", description: "Tool-call ID for deterministic path and idempotency." },
-            filename: { type: "string", description: "Optional filename override. Default: artifact.<format>." }
+            paperclipTicketId: {
+              type: "string",
+              pattern: "^[A-Z][A-Z0-9]{1,9}-[0-9]{1,9}$",
+              description: "Paperclip ticket ID (e.g. PLA-56) for path/commit message."
+            },
+            toolCallId: {
+              type: "string",
+              pattern: "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+              description: "Tool-call ID for deterministic path and idempotency."
+            },
+            filename: {
+              type: "string",
+              pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+              description: "Optional filename override. Default: artifact.<format>."
+            }
           },
-          required: ["artifactId", "format", "paperclipTicketId", "toolCallId"]
+          required: ["artifactId", "format", "paperclipTicketId", "toolCallId"],
+          additionalProperties: false
         }
       },
       async (params, runCtxRaw) => {
@@ -380,8 +731,54 @@ var plugin = definePlugin({
           return validationError(`format must be one of: ${validFormats.join(", ")}`);
         }
         const { artifactId, format, paperclipTicketId, toolCallId, filename } = p;
+        if (paperclipTicketId !== void 0) {
+          if (typeof paperclipTicketId !== "string") {
+            const ms = Date.now() - t0;
+            await emitMetrics(anyCtx, tool, ms, true);
+            logCompletion(ctx, tool, runCtx, ms, "error");
+            return validationError("paperclipTicketId must be a string");
+          }
+          const tErr = validateTicketId(paperclipTicketId);
+          if (tErr) {
+            const ms = Date.now() - t0;
+            await emitMetrics(anyCtx, tool, ms, true);
+            logCompletion(ctx, tool, runCtx, ms, "error");
+            return validationError(tErr);
+          }
+        }
+        if (toolCallId !== void 0) {
+          if (typeof toolCallId !== "string") {
+            const ms = Date.now() - t0;
+            await emitMetrics(anyCtx, tool, ms, true);
+            logCompletion(ctx, tool, runCtx, ms, "error");
+            return validationError("toolCallId must be a string");
+          }
+          const cErr = validateToolCallId(toolCallId);
+          if (cErr) {
+            const ms = Date.now() - t0;
+            await emitMetrics(anyCtx, tool, ms, true);
+            logCompletion(ctx, tool, runCtx, ms, "error");
+            return validationError(cErr);
+          }
+        }
+        if (filename !== void 0) {
+          if (typeof filename !== "string") {
+            const ms = Date.now() - t0;
+            await emitMetrics(anyCtx, tool, ms, true);
+            logCompletion(ctx, tool, runCtx, ms, "error");
+            return validationError("filename must be a string");
+          }
+          const fErr = validateFilename(filename);
+          if (fErr) {
+            const ms = Date.now() - t0;
+            await emitMetrics(anyCtx, tool, ms, true);
+            logCompletion(ctx, tool, runCtx, ms, "error");
+            return validationError(fErr);
+          }
+        }
         ctx.logger.info("cad:export: starting", { artifactId, format });
-        const stagingEntry = artifactStagingMap.get(artifactId);
+        const hasTenantCtx = typeof runCtx.companyId === "string" && runCtx.companyId.length > 0 && typeof runCtx.agentId === "string" && runCtx.agentId.length > 0;
+        const stagingEntry = hasTenantCtx ? artifactStagingMap.get(stagingMapKey(runCtx.companyId, runCtx.agentId, artifactId)) : void 0;
         if (!stagingEntry) {
           ctx.logger.warn("cad:export: unknown artifactId", { artifactId });
           const ms = Date.now() - t0;
@@ -413,8 +810,19 @@ var plugin = definePlugin({
         }
         const repoUrl = config.artifactRepoUrl ?? DEFAULT_ARTIFACT_REPO_URL;
         const branch = config.artifactRepoBranch ?? DEFAULT_ARTIFACT_BRANCH;
-        const resolvedFilename = filename ?? `artifact.${format}`;
-        const repoPath = `artifacts/${paperclipTicketId}/${toolCallId}/${resolvedFilename}`;
+        const ticketIdStr = paperclipTicketId;
+        const toolCallIdStr = toolCallId;
+        const filenameRaw = filename;
+        const resolvedFilename = filenameRaw ?? `artifact.${format}`;
+        const repoPath = `artifacts/${ticketIdStr}/${toolCallIdStr}/${resolvedFilename}`;
+        const pathErr = assertSafeRepoPath(repoPath);
+        if (pathErr) {
+          ctx.logger.warn("cad:export: repoPath assertion failed", { pathErr });
+          const ms = Date.now() - t0;
+          await emitMetrics(anyCtx, tool, ms, true);
+          logCompletion(ctx, tool, runCtx, ms, "error");
+          return validationError(pathErr);
+        }
         ctx.logger.info("cad:export: resolving GitHub PAT");
         const pat = await ctx.secrets.resolve(config.githubPatSecretId);
         try {
@@ -451,7 +859,7 @@ var plugin = definePlugin({
           logCompletion(ctx, tool, runCtx, ms, "error");
           return workerInternalError(msg);
         }
-        const commitMessage = `CAD artifact: ticket=${paperclipTicketId} tool=cad:export call=${toolCallId}`;
+        const commitMessage = `CAD artifact: ticket=${ticketIdStr} tool=cad:export call=${toolCallIdStr}`;
         const doPush = () => pushArtifactToGitHub(pat, repoUrl, branch, localFile, repoPath, commitMessage);
         ctx.logger.info("cad:export: pushing", { repoPath, branch });
         try {

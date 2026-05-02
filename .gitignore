@@ -1,2 +1,7 @@
 node_modules/
 *.local
+src/__pycache__/
+worker/seccomp_filter.bpf
+worker/seccomp_filter.bpf.sha256
+worker/cad_preexec
+perf-baseline.json
