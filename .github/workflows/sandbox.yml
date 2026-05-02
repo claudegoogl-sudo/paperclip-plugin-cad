@@ -142,12 +142,12 @@ jobs:
           # Mirror the rlimits from defaultRlimits() in cad-worker-client.ts
           # (asBytes=2GiB, nproc=64, nofile=256, fsize=256MiB, cpu=t+5,
           # core=0). Mismatched values would confuse the diagnostic.
-          RLIMIT_AS=2147483648
-          RLIMIT_NPROC=64
-          RLIMIT_NOFILE=256
-          RLIMIT_FSIZE=268435456
-          RLIMIT_CPU=35
-          RLIMIT_CORE=0
+          # Bubblewrap 0.9.0 (Ubuntu 24.04) does not expose --rlimit-* flags;
+          # rlimits are applied by the cad_preexec wrapper invoked between
+          # bwrap and python, exactly as buildSpawnInvocation does for the
+          # non-native-rlimits codepath in cad-worker-client.ts.
+          PREEXEC="$PWD/worker/cad_preexec"
+          test -x "$PREEXEC" || { echo "missing $PREEXEC"; exit 2; }
           set +e
           exec 3<worker/seccomp_filter.bpf
           bwrap \
@@ -161,6 +161,12 @@ jobs:
             --setenv PYTHONDONTWRITEBYTECODE 1 \
             --setenv PYTHONHASHSEED random \
             --setenv PYTHONUNBUFFERED 1 \
+            --setenv CAD_PREEXEC_RLIMIT_AS 2147483648 \
+            --setenv CAD_PREEXEC_RLIMIT_NPROC 64 \
+            --setenv CAD_PREEXEC_RLIMIT_NOFILE 256 \
+            --setenv CAD_PREEXEC_RLIMIT_FSIZE 268435456 \
+            --setenv CAD_PREEXEC_RLIMIT_CPU 35 \
+            --setenv CAD_PREEXEC_RLIMIT_CORE 0 \
             --uid 65534 --gid 65534 \
             --hostname cad-worker \
             --proc /proc \
@@ -170,18 +176,13 @@ jobs:
             --ro-bind /lib64 /lib64 \
             --ro-bind /bin /bin \
             --ro-bind /etc/ld.so.cache /etc/ld.so.cache \
+            --ro-bind "$PREEXEC" "$PREEXEC" \
             --tmpfs /tmp \
             --bind /tmp/cad-bwrap-smoke /tmp/cad-bwrap-smoke \
             --chdir /tmp/cad-bwrap-smoke \
             --cap-drop ALL \
             --seccomp 3 \
-            --rlimit-as "$RLIMIT_AS" \
-            --rlimit-nproc "$RLIMIT_NPROC" \
-            --rlimit-nofile "$RLIMIT_NOFILE" \
-            --rlimit-fsize "$RLIMIT_FSIZE" \
-            --rlimit-cpu "$RLIMIT_CPU" \
-            --rlimit-core "$RLIMIT_CORE" \
-            -- python3 /tmp/cad-bwrap-smoke/probe.py
+            -- "$PREEXEC" /usr/bin/python3 /tmp/cad-bwrap-smoke/probe.py
           rc=$?
           exec 3<&-
           echo "bwrap-smoke exit=$rc"
