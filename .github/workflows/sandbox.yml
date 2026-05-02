@@ -95,15 +95,39 @@ jobs:
       - name: Capture clone3 ENOSYS-fallback evidence (PLA-106 §6.4)
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
           # Spec rev 3 (3ffe6af0) §6.4: before the seccomp filter blob can be
           # locked for a release, the deploy-class host must produce three
           # measurement rows demonstrating the clone3 -> ENOSYS -> clone(2)
           # fallback works under the production seccomp filter. The script
           # exits 1 on the (4,0) outcome, which fails the build per spec
           # (escalation is board-approval-class, not silent retry).
+          #
+          # Diagnostic-enrichment (this commit): merge stderr into the same
+          # stream the artifact captures (2>&1) so a failing measurement row
+          # surfaces with full python tracebacks / bwrap diagnostics in the
+          # uploaded artifact, not just in the GHA log buffer. Also run each
+          # step individually after `all` so the failing step is named
+          # explicitly in CI output even when `all` short-circuits at step1
+          # under set -euo pipefail (per script comment lines 207-212, this
+          # is the supported diagnostic technique). Per CTO 15:56 directive,
+          # any failing step still fails the build — no masks.
           install -d evidence
-          ./worker/measure-clone-fallback.sh all | tee evidence/clone-fallback-ci.md
+          echo "=== measure-clone-fallback.sh all ==="
+          ./worker/measure-clone-fallback.sh all 2>&1 | tee evidence/clone-fallback-ci.md
+          rc_all=${PIPESTATUS[0]}
+          echo "all-exit=$rc_all"
+          if [[ $rc_all -ne 0 ]]; then
+            echo "=== diagnostic: step-by-step localization ==="
+            for s in s1 s2 s3; do
+              echo "--- $s ---" | tee -a evidence/clone-fallback-ci.md
+              ./worker/measure-clone-fallback.sh "$s" 2>&1 | tee -a evidence/clone-fallback-ci.md
+              rc_step=${PIPESTATUS[0]}
+              echo "$s-exit=$rc_step" | tee -a evidence/clone-fallback-ci.md
+            done
+            echo "::error::§6.4 measurement script failed (all-exit=$rc_all) — see uploaded artifact evidence/clone-fallback-ci.md and the per-step localization above."
+            exit $rc_all
+          fi
 
       - name: Upload §6.4 measurement artifact
         if: always()
