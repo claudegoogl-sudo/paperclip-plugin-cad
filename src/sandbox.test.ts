@@ -81,6 +81,7 @@ describe("invokeWorker — subprocess protocol", () => {
     const result = await invokeWorker(
       { script: "result = 1", format: "step", workdir },
       5,
+      { mode: "dev_direct" },
       "python3-nonexistent-bin",
     );
     expect(result.ok).toBe(false);
