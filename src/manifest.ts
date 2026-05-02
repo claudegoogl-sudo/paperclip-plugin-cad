@@ -1,6 +1,32 @@
 import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
 
-const manifest: PaperclipPluginManifestV1 = {
+/**
+ * PLA-114 / PLA-106 §5.2 — declare the kernel-sandbox requirement in the
+ * manifest. The host capability negotiation refuses to install the plugin
+ * on a host that does not advertise this requirement met (bubblewrap on
+ * PATH). The SDK manifest type does not yet model this field, so we extend
+ * locally; the JSON emitted at build time carries the field through to the
+ * host loader as documented in the spec.
+ */
+type ManifestWithRuntimeRequirements = PaperclipPluginManifestV1 & {
+  runtimeRequirements: {
+    /** "bubblewrap" — kernel-enforced sandbox required for the CAD worker. */
+    kernelSandbox: "bubblewrap";
+  };
+  /**
+   * Build-manifest pin for the seccomp filter blob (PLA-114 acceptance:
+   * "Build manifest pins the seccomp filter blob sha256"). The build script
+   * substitutes the real digest at `dist/manifest.js` build time; the
+   * placeholder below is what ships in source. The host can compare the
+   * declared digest against the on-disk blob it inherits with bwrap.
+   */
+  worker?: {
+    seccompFilterPath: string;
+    seccompFilterSha256: string;
+  };
+};
+
+const manifest: ManifestWithRuntimeRequirements = {
   id: "platform.cad",
   apiVersion: 1,
   version: "0.1.0",
@@ -27,6 +53,21 @@ const manifest: PaperclipPluginManifestV1 = {
 
   entrypoints: {
     worker: "./dist/worker.js",
+  },
+
+  // PLA-114 §5.2 — host-side kernel-sandbox capability negotiation.
+  runtimeRequirements: {
+    kernelSandbox: "bubblewrap",
+  },
+
+  // PLA-114 acceptance — pin the seccomp filter blob digest. The build
+  // script reads `worker/seccomp_filter.bpf.sha256` (produced by
+  // `make -C worker`) and substitutes the value here at build time. The
+  // literal below is a placeholder; an unsubstituted placeholder failing
+  // a sha256 length check at startup is the intended fail-closed signal.
+  worker: {
+    seccompFilterPath: "./worker/seccomp_filter.bpf",
+    seccompFilterSha256: "__PLA114_SECCOMP_FILTER_SHA256__",
   },
 
   // instanceConfigSchema — ties secret-scope strictly to githubPatSecretId
