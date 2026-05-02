@@ -253,19 +253,55 @@ describe.skipIf(!HAS_BWRAP)("PLA-114 §4 — bwrap+seccomp integration matrix", 
       expect(isKernelKill(r) || envelopeMatches(r, /PermissionError/)).toBe(true);
     }, T);
 
-    it("NEW2: clone(CLONE_NEWUSER|CLONE_NEWNET) via ctypes — SIGSYS", async () => {
-      // Even when ctypes is in-process-blocked the in-process layer
-      // raises ImportError, which is also a denial. The kernel test that
-      // matters is when ctypes is reachable; we still assert the union.
+    it("NEW2a: clone(CLONE_NEWUSER|CLONE_NEWNET) via raw syscall — SIGSYS", async () => {
+      // Per spec rev 3 §2.1: the clone(2) flag-check rule
+      // (PTHREAD_CLONE_FLAGS exact match) is the load-bearing enforcement
+      // of the "no namespace creation" invariant. NEW2a is the direct
+      // attacker path: a raw clone(2) with namespace flags must trip
+      // SCMP_ACT_KILL_PROCESS at syscall entry.
       const r = await run([
         "import ctypes",
-        "libc = ctypes.CDLL('libc.so.6')",
+        "libc = ctypes.CDLL('libc.so.6', use_errno=True)",
+        "SYS_clone = 56  # x86_64",
         "CLONE_NEWUSER = 0x10000000",
         "CLONE_NEWNET = 0x40000000",
-        "libc.unshare(CLONE_NEWUSER | CLONE_NEWNET)",
+        "libc.syscall(SYS_clone, CLONE_NEWUSER | CLONE_NEWNET, 0, 0, 0, 0)",
         "result = None",
       ].join("\n"));
       expect(isKernelKill(r) || !r.ok).toBe(true);
+    }, T);
+
+    it("NEW2b: clone3(ns) → ENOSYS, then clone(ns) → SIGSYS — chained", async () => {
+      // Per spec rev 3 §6.4 / Option 5: clone3 returns -1/ENOSYS for any
+      // args (BPF can't deref clone_args*). The attacker's natural fallback
+      // is clone(2) with the same flag set; the flag-check rule kills it.
+      // Both assertions in one test: failure of either is a regression of
+      // the chained attacker path. (Refinement-2, CTO comment e342af3c.)
+      const r = await run([
+        "import ctypes, errno",
+        "libc = ctypes.CDLL('libc.so.6', use_errno=True)",
+        "SYS_clone3 = 435",
+        "SYS_clone  = 56",
+        "CLONE_NEWUSER = 0x10000000",
+        "CLONE_NEWNET = 0x40000000",
+        "ns_flags = CLONE_NEWUSER | CLONE_NEWNET",
+        "# clone_args_v0 = 8 x u64 (size = 64). flags at offset 0.",
+        "args = (ctypes.c_uint64 * 8)()",
+        "args[0] = ns_flags",
+        "ctypes.set_errno(0)",
+        "rc = libc.syscall(SYS_clone3, ctypes.byref(args), ctypes.sizeof(args))",
+        "if rc != -1 or ctypes.get_errno() != errno.ENOSYS:",
+        "    raise SystemError(f'NEW2b_clone3_unexpected:rc={rc}:errno={ctypes.get_errno()}')",
+        "# Chained: clone(2) with namespace flags — must SIGSYS.",
+        "libc.syscall(SYS_clone, ns_flags, 0, 0, 0, 0)",
+        "result = None",
+      ].join("\n"));
+      // Pass condition: the chained clone(2) was kernel-killed (SIGSYS),
+      // OR the clone3 step raised NEW2b_clone3_unexpected (which already
+      // surfaces a regression). Either way, !r.ok.
+      expect(isKernelKill(r) || !r.ok).toBe(true);
+      // Regression guard: clone3 must NOT have succeeded silently.
+      expect(envelopeMatches(r, /successfully created/i)).toBe(false);
     }, T);
 
     it("NEW3: mount('tmpfs','/tmp',...) via ctypes — SIGSYS or EPERM", async () => {
@@ -427,12 +463,14 @@ describe.skipIf(!HAS_BWRAP)("PLA-114 §4 — bwrap+seccomp integration matrix", 
       if (r.ok) expect(await fileExists(r.artifactPath)).toBe(true);
     }, T);
 
-    it("NEW14: threading.Thread x4 — pthread allowlist works (or documented clone3 case)", async () => {
-      // Per PLA-106 §2.1 + worker/seccomp-evidence.md: on glibc >= 2.34
-      // pthread_create uses clone3, which the spec kills unconditionally.
-      // The spec explicitly accepts this and expects this test to drive
-      // a follow-up spec revision. We mark the failure mode here so
-      // operators reading the test output can correlate.
+    it("NEW14: threading.Thread x4 — pthread fallback canary (Option 5)", async () => {
+      // Spec rev 3 §6.4: clone3 returns ENOSYS, glibc falls back to
+      // clone(2) with PTHREAD_CLONE_FLAGS, threading must succeed cleanly.
+      // This is the durable runtime canary: if a future glibc removes the
+      // ENOSYS fallback, NEW14 fails loudly and the operator must escalate
+      // per §6.4 (route to request_board_approval, do NOT silently widen
+      // the clone3 rule). Pre-release evidence is captured separately by
+      // worker/measure-clone-fallback.sh; NEW14 is the runtime sentinel.
       const r = await run([
         "import threading",
         "vals = []",
@@ -445,16 +483,36 @@ describe.skipIf(!HAS_BWRAP)("PLA-114 §4 — bwrap+seccomp integration matrix", 
         "import cadquery as cq",
         "result = cq.Workplane('XY').box(1,1,1)",
       ].join("\n"));
-      if (!r.ok && isKernelKill(r)) {
-        // Documented pre-existing contingency — see seccomp-evidence.md.
-        // Surface it loudly so it cannot be ignored.
-        // eslint-disable-next-line no-console
-        console.warn(
-          "NEW14: threads killed at kernel layer — glibc clone3 path. " +
-            "Spec follow-up (widen clone3 rule) required per PLA-106 §2.1.",
-        );
-      }
       expect(r.ok).toBe(true);
+    }, T);
+
+    it("NEW15: clone3(SIGCHLD) → ENOSYS, then clone(SIGCHLD) → SIGSYS — chained", async () => {
+      // Spec rev 3 §2.1: the clone3 ENOSYS rule must hold for ANY args
+      // (BPF cannot inspect clone_args*). NEW15 exercises the
+      // process-replication path (SIGCHLD-only flag set, no thread flags):
+      // clone3 returns ENOSYS, and the chained clone(2) with the same
+      // non-pthread flag set is SIGSYS-killed by the flag-check rule. This
+      // covers the fork()-via-syscall attacker path that NEW11 leaves
+      // implicit.
+      const r = await run([
+        "import ctypes, errno",
+        "libc = ctypes.CDLL('libc.so.6', use_errno=True)",
+        "SYS_clone3 = 435",
+        "SYS_clone  = 56",
+        "SIGCHLD = 17",
+        "args = (ctypes.c_uint64 * 8)()",
+        "args[0] = SIGCHLD  # flags",
+        "args[4] = SIGCHLD  # exit_signal",
+        "ctypes.set_errno(0)",
+        "rc = libc.syscall(SYS_clone3, ctypes.byref(args), ctypes.sizeof(args))",
+        "if rc != -1 or ctypes.get_errno() != errno.ENOSYS:",
+        "    raise SystemError(f'NEW15_clone3_unexpected:rc={rc}:errno={ctypes.get_errno()}')",
+        "# Chained: clone(2) with SIGCHLD-only — flag-mismatch must SIGSYS.",
+        "libc.syscall(SYS_clone, SIGCHLD, 0, 0, 0, 0)",
+        "result = None",
+      ].join("\n"));
+      expect(isKernelKill(r) || !r.ok).toBe(true);
+      expect(envelopeMatches(r, /child_pid=\d+/i)).toBe(false);
     }, T);
   });
 

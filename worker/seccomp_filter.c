@@ -129,13 +129,38 @@ int main(void)
     }
 
     /*
-     * clone3: take a struct clone_args pointer, so BPF cannot filter by
-     * flags. Spec §2.1 explicitly chose to kill clone3 unconditionally and
-     * rely on glibc preferring clone() for pthreads on supported kernels.
-     * On glibc >= 2.34 pthread_create() uses clone3, in which case NEW14
-     * will fail and the SecurityEngineer follow-up widens the rule.
+     * clone3: takes a struct clone_args pointer, so BPF cannot filter by
+     * flags. Spec PLA-106 §2.1 (rev 3, revision id 3ffe6af0) selects
+     * Option 5: return ENOSYS to userspace. glibc's nptl pthread_create
+     * and fork paths check for ENOSYS from the clone3 wrapper and fall
+     * back to clone(2) with equivalent flags. The fallback then hits the
+     * clone(2) flag-check rule above, which is the actual enforcement of
+     * the "no namespace creation, no process replication" invariant.
+     *
+     * Net effect: every task-creation reaches the kernel as clone(2);
+     * clone3 only ever fails with -ENOSYS. NEW14 (positive threading
+     * control) is the durable canary for "is the ENOSYS fallback still
+     * working in this glibc?" — necessary, not sufficient.
+     *
+     * Spec §6.4 records the validation experiment: a 3-step measurement
+     * on the deploy host that confirms ENOSYS return + threading success
+     * + the (clone3_count, clone_count) call ratio. The measurement gate
+     * fires before the seccomp filter blob is locked for release.
      */
-    kill_syscall(ctx, "clone3");
+    {
+        int sc_clone3 = seccomp_syscall_resolve_name("clone3");
+        if (sc_clone3 != __NR_SCMP_ERROR) {
+            int rc = seccomp_rule_add(
+                ctx, SCMP_ACT_ERRNO(ENOSYS), sc_clone3, 0);
+            if (rc < 0) {
+                fprintf(stderr,
+                        "seccomp_rule_add(clone3, ERRNO ENOSYS): %s\n",
+                        strerror(-rc));
+                seccomp_release(ctx);
+                return 1;
+            }
+        }
+    }
 
     /* ===== Network kill switch (defense-in-depth alongside netns) ===== */
     kill_syscall(ctx, "socket");
