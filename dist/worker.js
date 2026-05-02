@@ -1,5 +1,6 @@
 // src/worker.ts
 import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
+import * as path from "node:path";
 
 // src/cad-worker-client.ts
 import { spawn } from "node:child_process";
@@ -409,6 +410,43 @@ function logCompletion(ctx, tool, runCtx, durationMs, status) {
     durationMs
   });
 }
+var TICKET_ID_RE = /^[A-Z][A-Z0-9]{1,9}-[0-9]{1,9}$/;
+var TOOL_CALL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+var FILENAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+function validateTicketId(value) {
+  if (!TICKET_ID_RE.test(value)) {
+    return "paperclipTicketId must match ^[A-Z][A-Z0-9]{1,9}-[0-9]{1,9}$ (e.g. PLA-56)";
+  }
+  return null;
+}
+function validateToolCallId(value) {
+  if (!TOOL_CALL_ID_RE.test(value)) {
+    return "toolCallId must match ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$";
+  }
+  return null;
+}
+function validateFilename(value) {
+  if (value.startsWith(".") || value.includes("..")) {
+    return "filename must not start with '.' or contain '..'";
+  }
+  if (!FILENAME_RE.test(value)) {
+    return "filename must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$";
+  }
+  return null;
+}
+function assertSafeRepoPath(repoPath) {
+  const normalized = path.posix.normalize(repoPath);
+  if (normalized !== repoPath) return "internal: repoPath would normalize differently (path traversal blocked)";
+  if (!normalized.startsWith("artifacts/")) return "internal: repoPath must start with 'artifacts/'";
+  return null;
+}
+function encodeRepoPathForUrl(repoPath) {
+  return repoPath.split("/").map(encodeURIComponent).join("/");
+}
+var FETCH_TIMEOUT_MS = 3e4;
+function fetchSignal() {
+  return AbortSignal.timeout(FETCH_TIMEOUT_MS);
+}
 function githubHeaders(pat) {
   return {
     Authorization: `Bearer ${pat}`,
@@ -419,16 +457,33 @@ function githubHeaders(pat) {
   };
 }
 function parseGitHubUrl(repoUrl) {
-  const match = repoUrl.match(/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/);
-  if (!match) throw new PushError("prerequisite_missing", `Cannot parse GitHub URL: ${repoUrl}`);
-  return [match[1], match[2]];
+  let u;
+  try {
+    u = new URL(repoUrl);
+  } catch {
+    throw new PushError("prerequisite_missing", `Cannot parse GitHub URL: ${repoUrl}`);
+  }
+  if (u.protocol !== "https:" || u.host !== "github.com") {
+    throw new PushError(
+      "prerequisite_missing",
+      `artifactRepoUrl must be an https://github.com/<owner>/<repo>(.git) URL. Got: ${repoUrl}`
+    );
+  }
+  const segs = u.pathname.replace(/^\/+/, "").replace(/\.git\/?$/, "").replace(/\/+$/, "").split("/");
+  if (segs.length !== 2 || !segs[0] || !segs[1]) {
+    throw new PushError("prerequisite_missing", `Cannot parse owner/repo from ${repoUrl}`);
+  }
+  return [segs[0], segs[1]];
 }
 async function checkRepoPrerequisite(pat, repoUrl) {
   const [owner, repo] = parseGitHubUrl(repoUrl);
   const headers = githubHeaders(pat);
   let resp;
   try {
-    resp = await fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers });
+    resp = await fetch(
+      `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
+      { headers, signal: fetchSignal() }
+    );
   } catch (err) {
     throw new PushError("network", `Network error reaching ${owner}/${repo}: ${err.message}`);
   }
@@ -458,9 +513,15 @@ async function checkArtifactExists(pat, repoUrl, repoPath) {
     return null;
   }
   const headers = githubHeaders(pat);
+  const encodedPath = encodeRepoPathForUrl(repoPath);
+  const ownerEnc = encodeURIComponent(owner);
+  const repoEnc = encodeURIComponent(repo);
   let contentsResp;
   try {
-    contentsResp = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${repoPath}`, { headers });
+    contentsResp = await fetch(
+      `https://api.github.com/repos/${ownerEnc}/${repoEnc}/contents/${encodedPath}`,
+      { headers, signal: fetchSignal() }
+    );
   } catch {
     return null;
   }
@@ -468,8 +529,8 @@ async function checkArtifactExists(pat, repoUrl, repoPath) {
   const contentsData = await contentsResp.json();
   try {
     const commitResp = await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/commits?path=${encodeURIComponent(repoPath)}&per_page=1`,
-      { headers }
+      `https://api.github.com/repos/${ownerEnc}/${repoEnc}/commits?path=${encodeURIComponent(repoPath)}&per_page=1`,
+      { headers, signal: fetchSignal() }
     );
     if (commitResp.ok) {
       const commits = await commitResp.json();
@@ -487,12 +548,13 @@ async function pushArtifactToGitHub(pat, repoUrl, branch, localFile, repoPath, m
   const [owner, repo] = parseGitHubUrl(repoUrl);
   const { readFile } = await import("node:fs/promises");
   const contentBase64 = (await readFile(localFile)).toString("base64");
-  const apiBase = `https://api.github.com/repos/${owner}/${repo}/contents/${repoPath}`;
+  const encodedPath = encodeRepoPathForUrl(repoPath);
+  const apiBase = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodedPath}`;
   const headers = githubHeaders(pat);
   let existingSha;
   let getResp;
   try {
-    getResp = await fetch(apiBase, { headers });
+    getResp = await fetch(apiBase, { headers, signal: fetchSignal() });
   } catch (err) {
     throw new PushError("network", `Network error fetching ${repoPath}: ${err.message}`);
   }
@@ -507,7 +569,7 @@ async function pushArtifactToGitHub(pat, repoUrl, branch, localFile, repoPath, m
   if (existingSha) body.sha = existingSha;
   let putResp;
   try {
-    putResp = await fetch(apiBase, { method: "PUT", headers, body: JSON.stringify(body) });
+    putResp = await fetch(apiBase, { method: "PUT", headers, body: JSON.stringify(body), signal: fetchSignal() });
   } catch (err) {
     throw new PushError("network", `Network error pushing ${repoPath}: ${err.message}`);
   }
@@ -624,11 +686,24 @@ var plugin = definePlugin({
           properties: {
             artifactId: { type: "string", description: "Artifact ID from cad:run_script." },
             format: { type: "string", enum: ["step", "stl", "3mf"], description: "Output format." },
-            paperclipTicketId: { type: "string", description: "Paperclip ticket ID for path/commit message." },
-            toolCallId: { type: "string", description: "Tool-call ID for deterministic path and idempotency." },
-            filename: { type: "string", description: "Optional filename override. Default: artifact.<format>." }
+            paperclipTicketId: {
+              type: "string",
+              pattern: "^[A-Z][A-Z0-9]{1,9}-[0-9]{1,9}$",
+              description: "Paperclip ticket ID (e.g. PLA-56) for path/commit message."
+            },
+            toolCallId: {
+              type: "string",
+              pattern: "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+              description: "Tool-call ID for deterministic path and idempotency."
+            },
+            filename: {
+              type: "string",
+              pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+              description: "Optional filename override. Default: artifact.<format>."
+            }
           },
-          required: ["artifactId", "format", "paperclipTicketId", "toolCallId"]
+          required: ["artifactId", "format", "paperclipTicketId", "toolCallId"],
+          additionalProperties: false
         }
       },
       async (params, runCtxRaw) => {
@@ -656,6 +731,51 @@ var plugin = definePlugin({
           return validationError(`format must be one of: ${validFormats.join(", ")}`);
         }
         const { artifactId, format, paperclipTicketId, toolCallId, filename } = p;
+        if (paperclipTicketId !== void 0) {
+          if (typeof paperclipTicketId !== "string") {
+            const ms = Date.now() - t0;
+            await emitMetrics(anyCtx, tool, ms, true);
+            logCompletion(ctx, tool, runCtx, ms, "error");
+            return validationError("paperclipTicketId must be a string");
+          }
+          const tErr = validateTicketId(paperclipTicketId);
+          if (tErr) {
+            const ms = Date.now() - t0;
+            await emitMetrics(anyCtx, tool, ms, true);
+            logCompletion(ctx, tool, runCtx, ms, "error");
+            return validationError(tErr);
+          }
+        }
+        if (toolCallId !== void 0) {
+          if (typeof toolCallId !== "string") {
+            const ms = Date.now() - t0;
+            await emitMetrics(anyCtx, tool, ms, true);
+            logCompletion(ctx, tool, runCtx, ms, "error");
+            return validationError("toolCallId must be a string");
+          }
+          const cErr = validateToolCallId(toolCallId);
+          if (cErr) {
+            const ms = Date.now() - t0;
+            await emitMetrics(anyCtx, tool, ms, true);
+            logCompletion(ctx, tool, runCtx, ms, "error");
+            return validationError(cErr);
+          }
+        }
+        if (filename !== void 0) {
+          if (typeof filename !== "string") {
+            const ms = Date.now() - t0;
+            await emitMetrics(anyCtx, tool, ms, true);
+            logCompletion(ctx, tool, runCtx, ms, "error");
+            return validationError("filename must be a string");
+          }
+          const fErr = validateFilename(filename);
+          if (fErr) {
+            const ms = Date.now() - t0;
+            await emitMetrics(anyCtx, tool, ms, true);
+            logCompletion(ctx, tool, runCtx, ms, "error");
+            return validationError(fErr);
+          }
+        }
         ctx.logger.info("cad:export: starting", { artifactId, format });
         const hasTenantCtx = typeof runCtx.companyId === "string" && runCtx.companyId.length > 0 && typeof runCtx.agentId === "string" && runCtx.agentId.length > 0;
         const stagingEntry = hasTenantCtx ? artifactStagingMap.get(stagingMapKey(runCtx.companyId, runCtx.agentId, artifactId)) : void 0;
@@ -690,8 +810,19 @@ var plugin = definePlugin({
         }
         const repoUrl = config.artifactRepoUrl ?? DEFAULT_ARTIFACT_REPO_URL;
         const branch = config.artifactRepoBranch ?? DEFAULT_ARTIFACT_BRANCH;
-        const resolvedFilename = filename ?? `artifact.${format}`;
-        const repoPath = `artifacts/${paperclipTicketId}/${toolCallId}/${resolvedFilename}`;
+        const ticketIdStr = paperclipTicketId;
+        const toolCallIdStr = toolCallId;
+        const filenameRaw = filename;
+        const resolvedFilename = filenameRaw ?? `artifact.${format}`;
+        const repoPath = `artifacts/${ticketIdStr}/${toolCallIdStr}/${resolvedFilename}`;
+        const pathErr = assertSafeRepoPath(repoPath);
+        if (pathErr) {
+          ctx.logger.warn("cad:export: repoPath assertion failed", { pathErr });
+          const ms = Date.now() - t0;
+          await emitMetrics(anyCtx, tool, ms, true);
+          logCompletion(ctx, tool, runCtx, ms, "error");
+          return validationError(pathErr);
+        }
         ctx.logger.info("cad:export: resolving GitHub PAT");
         const pat = await ctx.secrets.resolve(config.githubPatSecretId);
         try {
@@ -728,7 +859,7 @@ var plugin = definePlugin({
           logCompletion(ctx, tool, runCtx, ms, "error");
           return workerInternalError(msg);
         }
-        const commitMessage = `CAD artifact: ticket=${paperclipTicketId} tool=cad:export call=${toolCallId}`;
+        const commitMessage = `CAD artifact: ticket=${ticketIdStr} tool=cad:export call=${toolCallIdStr}`;
         const doPush = () => pushArtifactToGitHub(pat, repoUrl, branch, localFile, repoPath, commitMessage);
         ctx.logger.info("cad:export: pushing", { repoPath, branch });
         try {

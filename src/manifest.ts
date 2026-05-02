@@ -72,6 +72,8 @@ const manifest: ManifestWithRuntimeRequirements = {
 
   // instanceConfigSchema — ties secret-scope strictly to githubPatSecretId
   // (PLA-41 remediation #2). Fields validated by the host before plugin load.
+  // PLA-74 F3: additionalProperties:false so unknown keys are rejected at host
+  // load time rather than silently ignored (fail-closed).
   instanceConfigSchema: {
     type: "object",
     properties: {
@@ -95,6 +97,7 @@ const manifest: ManifestWithRuntimeRequirements = {
       },
     },
     required: ["githubPatSecretId"],
+    additionalProperties: false,
   },
 
   // v0.1.0 tool surface — operator-confirmed via approval f420bc31 (2026-05-01).
@@ -150,21 +153,28 @@ const manifest: ManifestWithRuntimeRequirements = {
           },
           paperclipTicketId: {
             type: "string",
+            // PLA-74 F1/F2 — allowlist regex; rejects path traversal and
+            // commit-message injection at the host's schema-validation gate.
+            pattern: "^[A-Z][A-Z0-9]{1,9}-[0-9]{1,9}$",
             description:
               "Paperclip ticket ID (e.g. PLA-56). Used in artifact path and commit message.",
           },
           toolCallId: {
             type: "string",
+            pattern: "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
             description:
               "Unique ID for this tool call. Used for deterministic artifact path and idempotency.",
           },
           filename: {
             type: "string",
+            pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
             description:
               "Optional artifact filename. Defaults to 'artifact.<format>'.",
           },
         },
         required: ["artifactId", "format", "paperclipTicketId", "toolCallId"],
+        // PLA-74 F3 — fail-closed on unknown fields; matches cad:run_script.
+        additionalProperties: false,
       },
     },
   ],

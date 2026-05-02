@@ -18,13 +18,22 @@
  *
  * Push error taxonomy (PLA-56 AC4):
  *   "auth"                 — 401/403: rotate PAT, no retry.
- *   "network"              — 5xx / network error: transient, surface to agent.
+ *   "network"              — 5xx / network error / fetch timeout: transient, surface to agent.
  *   "conflict"             — 409/422: re-fetch SHA and retry once (inline).
  *   "prerequisite_missing" — repo 404/403: operator must pre-create repo.
+ *
+ * PLA-56 / PLA-74 SecurityEngineer review fixes (commit ba36ef1 review):
+ *   F1 — Path-traversal allowlist on paperclipTicketId/toolCallId/filename,
+ *        post-build path normalization assertion, per-segment URL encoding.
+ *   F2 — Subsumed by F1 (allowlist excludes newlines + commit-message trailers).
+ *   F3 — additionalProperties:false on instanceConfigSchema and cad:export schema.
+ *   F4 — Strict URL parsing for parseGitHubUrl with host === "github.com".
+ *   F5 — AbortSignal.timeout(30_000) on every outbound fetch.
  */
 
 import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
+import * as path from "node:path";
 
 // INTEGRATION SWITCH (sub-goal 2 / PLA-54): real CadQuery sandbox client.
 import {
@@ -130,6 +139,80 @@ function logCompletion(ctx: PluginContext, tool: string, runCtx: RunCtx, duratio
 }
 
 // ---------------------------------------------------------------------------
+// F1 / F2 — input allowlists (path-traversal + commit-message-injection defence)
+//
+// Defence-in-depth in three independent layers:
+//   1. Allowlist regex per component before building the repo path.
+//   2. After building the path, assert path.posix.normalize is an identity AND
+//      that the result starts with "artifacts/". Either failure is fail-closed.
+//   3. Per-segment URL encoding when building the GitHub Contents API URL so
+//      any residual oddity is rendered inert.
+//
+// Each layer is sufficient on its own; together they form the F1 fix.
+// ---------------------------------------------------------------------------
+
+const TICKET_ID_RE = /^[A-Z][A-Z0-9]{1,9}-[0-9]{1,9}$/;
+const TOOL_CALL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+const FILENAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+function validateTicketId(value: string): string | null {
+  if (!TICKET_ID_RE.test(value)) {
+    return "paperclipTicketId must match ^[A-Z][A-Z0-9]{1,9}-[0-9]{1,9}$ (e.g. PLA-56)";
+  }
+  return null;
+}
+
+function validateToolCallId(value: string): string | null {
+  if (!TOOL_CALL_ID_RE.test(value)) {
+    return "toolCallId must match ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$";
+  }
+  return null;
+}
+
+function validateFilename(value: string): string | null {
+  if (value.startsWith(".") || value.includes("..")) {
+    return "filename must not start with '.' or contain '..'";
+  }
+  if (!FILENAME_RE.test(value)) {
+    return "filename must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$";
+  }
+  return null;
+}
+
+/**
+ * F1 layer 2: post-build assertion. Any input that survives the per-component
+ * allowlist must, after POSIX normalization, still start with "artifacts/" and
+ * be byte-identical to the un-normalized form. Fail-closed on any drift.
+ */
+function assertSafeRepoPath(repoPath: string): string | null {
+  const normalized = path.posix.normalize(repoPath);
+  if (normalized !== repoPath) return "internal: repoPath would normalize differently (path traversal blocked)";
+  if (!normalized.startsWith("artifacts/")) return "internal: repoPath must start with 'artifacts/'";
+  return null;
+}
+
+/**
+ * F1 layer 3: encode each segment so reserved characters cannot affect the URL
+ * structure. Path separators stay as `/`; segments are encodeURIComponent-d.
+ */
+function encodeRepoPathForUrl(repoPath: string): string {
+  return repoPath.split("/").map(encodeURIComponent).join("/");
+}
+
+// ---------------------------------------------------------------------------
+// F5 — fetch timeout (30s) on every outbound call
+//
+// AbortSignal.timeout aborts the request after N ms; we surface the abort as
+// a "network" PushError so the agent treats it as transient.
+// ---------------------------------------------------------------------------
+
+const FETCH_TIMEOUT_MS = 30_000;
+
+function fetchSignal(): AbortSignal {
+  return AbortSignal.timeout(FETCH_TIMEOUT_MS);
+}
+
+// ---------------------------------------------------------------------------
 // GitHub API helpers (PLA-56)
 // ---------------------------------------------------------------------------
 
@@ -143,10 +226,29 @@ function githubHeaders(pat: string): Record<string, string> {
   };
 }
 
+/**
+ * F4 — strict URL parsing. The previous regex accepted any URL whose path
+ * happened to contain `github.com/<owner>/<repo>` (e.g. attacker-controlled
+ * `https://attacker.example/path/github.com/o/r.git`). Replace with WHATWG
+ * URL parsing + `host === "github.com"` so a future refactor that derives the
+ * request host from the configured URL cannot be redirected off-platform.
+ */
 function parseGitHubUrl(repoUrl: string): [string, string] {
-  const match = repoUrl.match(/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/);
-  if (!match) throw new PushError("prerequisite_missing", `Cannot parse GitHub URL: ${repoUrl}`);
-  return [match[1], match[2]];
+  let u: URL;
+  try {
+    u = new URL(repoUrl);
+  } catch {
+    throw new PushError("prerequisite_missing", `Cannot parse GitHub URL: ${repoUrl}`);
+  }
+  if (u.protocol !== "https:" || u.host !== "github.com") {
+    throw new PushError("prerequisite_missing",
+      `artifactRepoUrl must be an https://github.com/<owner>/<repo>(.git) URL. Got: ${repoUrl}`);
+  }
+  const segs = u.pathname.replace(/^\/+/, "").replace(/\.git\/?$/, "").replace(/\/+$/, "").split("/");
+  if (segs.length !== 2 || !segs[0] || !segs[1]) {
+    throw new PushError("prerequisite_missing", `Cannot parse owner/repo from ${repoUrl}`);
+  }
+  return [segs[0], segs[1]];
 }
 
 async function checkRepoPrerequisite(pat: string, repoUrl: string): Promise<void> {
@@ -154,8 +256,12 @@ async function checkRepoPrerequisite(pat: string, repoUrl: string): Promise<void
   const headers = githubHeaders(pat);
   let resp: Response;
   try {
-    resp = await fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers });
+    resp = await fetch(
+      `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
+      { headers, signal: fetchSignal() },
+    );
   } catch (err) {
+    // F5: AbortSignal.timeout aborts trigger TimeoutError; surface as network.
     throw new PushError("network", `Network error reaching ${owner}/${repo}: ${(err as Error).message}`);
   }
   if (resp.status === 404) {
@@ -180,16 +286,22 @@ async function checkArtifactExists(pat: string, repoUrl: string, repoPath: strin
   let owner: string, repo: string;
   try { [owner, repo] = parseGitHubUrl(repoUrl); } catch { return null; }
   const headers = githubHeaders(pat);
+  const encodedPath = encodeRepoPathForUrl(repoPath); // F1 layer 3
+  const ownerEnc = encodeURIComponent(owner);
+  const repoEnc = encodeURIComponent(repo);
   let contentsResp: Response;
   try {
-    contentsResp = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${repoPath}`, { headers });
+    contentsResp = await fetch(
+      `https://api.github.com/repos/${ownerEnc}/${repoEnc}/contents/${encodedPath}`,
+      { headers, signal: fetchSignal() },
+    );
   } catch { return null; }
   if (!contentsResp.ok) return null;
   const contentsData = (await contentsResp.json()) as { sha?: string; html_url?: string };
   try {
     const commitResp = await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/commits?path=${encodeURIComponent(repoPath)}&per_page=1`,
-      { headers });
+      `https://api.github.com/repos/${ownerEnc}/${repoEnc}/commits?path=${encodeURIComponent(repoPath)}&per_page=1`,
+      { headers, signal: fetchSignal() });
     if (commitResp.ok) {
       const commits = (await commitResp.json()) as Array<{ sha?: string }>;
       const sha = commits[0]?.sha;
@@ -209,12 +321,14 @@ async function pushArtifactToGitHub(
   const [owner, repo] = parseGitHubUrl(repoUrl);
   const { readFile } = await import("node:fs/promises");
   const contentBase64 = (await readFile(localFile)).toString("base64");
-  const apiBase = `https://api.github.com/repos/${owner}/${repo}/contents/${repoPath}`;
+  // F1 layer 3: per-segment encoding when building the Contents API URL.
+  const encodedPath = encodeRepoPathForUrl(repoPath);
+  const apiBase = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodedPath}`;
   const headers = githubHeaders(pat);
 
   let existingSha: string | undefined;
   let getResp: Response;
-  try { getResp = await fetch(apiBase, { headers }); }
+  try { getResp = await fetch(apiBase, { headers, signal: fetchSignal() }); }
   catch (err) { throw new PushError("network", `Network error fetching ${repoPath}: ${(err as Error).message}`); }
   if (getResp.ok) {
     existingSha = ((await getResp.json()) as { sha?: string }).sha;
@@ -228,7 +342,7 @@ async function pushArtifactToGitHub(
   if (existingSha) body.sha = existingSha;
 
   let putResp: Response;
-  try { putResp = await fetch(apiBase, { method: "PUT", headers, body: JSON.stringify(body) }); }
+  try { putResp = await fetch(apiBase, { method: "PUT", headers, body: JSON.stringify(body), signal: fetchSignal() }); }
   catch (err) { throw new PushError("network", `Network error pushing ${repoPath}: ${(err as Error).message}`); }
 
   if (!putResp.ok) {
@@ -379,11 +493,24 @@ const plugin = definePlugin({
           properties: {
             artifactId: { type: "string", description: "Artifact ID from cad:run_script." },
             format: { type: "string", enum: ["step", "stl", "3mf"], description: "Output format." },
-            paperclipTicketId: { type: "string", description: "Paperclip ticket ID for path/commit message." },
-            toolCallId: { type: "string", description: "Tool-call ID for deterministic path and idempotency." },
-            filename: { type: "string", description: "Optional filename override. Default: artifact.<format>." },
+            paperclipTicketId: {
+              type: "string",
+              pattern: "^[A-Z][A-Z0-9]{1,9}-[0-9]{1,9}$",
+              description: "Paperclip ticket ID (e.g. PLA-56) for path/commit message.",
+            },
+            toolCallId: {
+              type: "string",
+              pattern: "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+              description: "Tool-call ID for deterministic path and idempotency.",
+            },
+            filename: {
+              type: "string",
+              pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+              description: "Optional filename override. Default: artifact.<format>.",
+            },
           },
           required: ["artifactId", "format", "paperclipTicketId", "toolCallId"],
+          additionalProperties: false,
         },
       },
       async (params, runCtxRaw?: unknown) => {
@@ -415,10 +542,60 @@ const plugin = definePlugin({
         const { artifactId, format, paperclipTicketId, toolCallId, filename } = p as {
           artifactId: string;
           format: "step" | "stl" | "3mf";
-          paperclipTicketId?: string;
-          toolCallId?: string;
-          filename?: string;
+          paperclipTicketId?: unknown;
+          toolCallId?: unknown;
+          filename?: unknown;
         };
+
+        // F1 — when GitHub-pipeline params are present, run them through a
+        // strict allowlist BEFORE building the repo path. Reject newlines,
+        // path-traversal sequences, commit-message-injection trailers, and any
+        // character that could escape the artifacts/ subtree.
+        if (paperclipTicketId !== undefined) {
+          if (typeof paperclipTicketId !== "string") {
+            const ms = Date.now() - t0;
+            await emitMetrics(anyCtx, tool, ms, true);
+            logCompletion(ctx, tool, runCtx, ms, "error");
+            return validationError("paperclipTicketId must be a string");
+          }
+          const tErr = validateTicketId(paperclipTicketId);
+          if (tErr) {
+            const ms = Date.now() - t0;
+            await emitMetrics(anyCtx, tool, ms, true);
+            logCompletion(ctx, tool, runCtx, ms, "error");
+            return validationError(tErr);
+          }
+        }
+        if (toolCallId !== undefined) {
+          if (typeof toolCallId !== "string") {
+            const ms = Date.now() - t0;
+            await emitMetrics(anyCtx, tool, ms, true);
+            logCompletion(ctx, tool, runCtx, ms, "error");
+            return validationError("toolCallId must be a string");
+          }
+          const cErr = validateToolCallId(toolCallId);
+          if (cErr) {
+            const ms = Date.now() - t0;
+            await emitMetrics(anyCtx, tool, ms, true);
+            logCompletion(ctx, tool, runCtx, ms, "error");
+            return validationError(cErr);
+          }
+        }
+        if (filename !== undefined) {
+          if (typeof filename !== "string") {
+            const ms = Date.now() - t0;
+            await emitMetrics(anyCtx, tool, ms, true);
+            logCompletion(ctx, tool, runCtx, ms, "error");
+            return validationError("filename must be a string");
+          }
+          const fErr = validateFilename(filename);
+          if (fErr) {
+            const ms = Date.now() - t0;
+            await emitMetrics(anyCtx, tool, ms, true);
+            logCompletion(ctx, tool, runCtx, ms, "error");
+            return validationError(fErr);
+          }
+        }
 
         ctx.logger.info("cad:export: starting", { artifactId, format });
 
@@ -469,8 +646,28 @@ const plugin = definePlugin({
 
         const repoUrl = config.artifactRepoUrl ?? DEFAULT_ARTIFACT_REPO_URL;
         const branch = config.artifactRepoBranch ?? DEFAULT_ARTIFACT_BRANCH;
-        const resolvedFilename = filename ?? `artifact.${format}`;
-        const repoPath = `artifacts/${paperclipTicketId}/${toolCallId}/${resolvedFilename}`;
+        // Cast back to narrowed string types — the F1 allowlist above proved them.
+        const ticketIdStr = paperclipTicketId as string;
+        const toolCallIdStr = toolCallId as string;
+        const filenameRaw = filename as string | undefined;
+        // Default filename: artifact.<format>. format is enum-validated.
+        const resolvedFilename = filenameRaw ?? `artifact.${format}`;
+        // resolvedFilename was either explicit (validated) or derived from the
+        // enum format ("artifact.step" / "artifact.stl" / "artifact.3mf"); the
+        // derived form is allowlist-safe by construction.
+        const repoPath = `artifacts/${ticketIdStr}/${toolCallIdStr}/${resolvedFilename}`;
+        // F1 layer 2 — fail-closed if anything would normalize to a different
+        // path or escape the artifacts/ subtree. Defence-in-depth: should be
+        // unreachable after the allowlist regexes, but the assertion is the
+        // authoritative guard.
+        const pathErr = assertSafeRepoPath(repoPath);
+        if (pathErr) {
+          ctx.logger.warn("cad:export: repoPath assertion failed", { pathErr });
+          const ms = Date.now() - t0;
+          await emitMetrics(anyCtx, tool, ms, true);
+          logCompletion(ctx, tool, runCtx, ms, "error");
+          return validationError(pathErr);
+        }
 
         ctx.logger.info("cad:export: resolving GitHub PAT");
         const pat = await ctx.secrets.resolve(config.githubPatSecretId);
@@ -512,7 +709,10 @@ const plugin = definePlugin({
           return workerInternalError(msg);
         }
 
-        const commitMessage = `CAD artifact: ticket=${paperclipTicketId} tool=cad:export call=${toolCallId}`;
+        // F2 — uses already-allowlisted strings; no newlines, no commit-message
+        // trailers can land here because TICKET_ID_RE and TOOL_CALL_ID_RE
+        // exclude every character that isn't alphanumeric / dash / underscore.
+        const commitMessage = `CAD artifact: ticket=${ticketIdStr} tool=cad:export call=${toolCallIdStr}`;
         const doPush = (): Promise<PushResult> =>
           pushArtifactToGitHub(pat, repoUrl, branch, localFile, repoPath, commitMessage);
 

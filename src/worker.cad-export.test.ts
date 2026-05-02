@@ -302,7 +302,7 @@ describe("cad:export PLA-56 pipeline", () => {
     const plugin2 = (await import("./worker.js")) as { default?: { setup?: (ctx: unknown) => Promise<void> } };
     await plugin2.default?.setup?.(customCtx);
 
-    const runResult = (await handlers["cad:run_script"]({ script: "x=1" }, DEFAULT_RUN_CTX)) as { data?: { artifactId?: string } };
+    const runResult = (await handlers["cad:run_script"]({ script: BOX_SCRIPT }, DEFAULT_RUN_CTX)) as { data?: { artifactId?: string } };
     const artifactId = runResult.data?.artifactId!;
 
     const fetchMock = vi.mocked(globalThis.fetch);
@@ -423,5 +423,211 @@ describe("cad:export PLA-56 pipeline", () => {
     expect(result.data?.statusCode).toBe(500);
     expect(result.data?.message).toMatch(/No staged artifact/);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PLA-74 SecurityEngineer review — F1/F2 regression tests
+//
+// Covers the "Required tests" list from the F1 finding:
+//   1. Reject paperclipTicketId="../.."
+//   2. Reject toolCallId="../foo"
+//   3. Reject filename=".github/workflows/x.yml"
+//   4. Reject filename="../../escape"
+//   5. Reject paperclipTicketId="PLA-1\nCloses #1" (commit-message injection)
+//   6. Reject paperclipTicketId="x; rm -rf"
+//   7. Path normalization: surviving inputs build a path starting with "artifacts/"
+//   8. Constructed Contents API URL contains exactly the expected path
+//
+// All cases must return validation_error and MUST NOT call fetch.
+// ---------------------------------------------------------------------------
+
+describe("cad:export PLA-74 F1/F2 — input allowlist (path-traversal + commit-injection)", () => {
+  // Each test stages a real artifact then submits an adversarial input. The
+  // expected outcome is a fail-closed validation_error with no outbound fetch.
+  it("F1.1: rejects paperclipTicketId='../..' with validation_error", { timeout: 15000 }, async () => {
+    const artifactId = await stageArtifact();
+    const fetchMock = vi.mocked(globalThis.fetch);
+    fetchMock.mockReset();
+
+    const result = (await exportArtifact({
+      artifactId, format: "step" as const,
+      paperclipTicketId: "../..", toolCallId: "call-x",
+    })) as { error?: string; data?: { code?: string; message?: string } };
+    expect(result.error).toBe("validation_error");
+    expect(result.data?.code).toBe("validation_error");
+    expect(result.data?.message).toMatch(/paperclipTicketId/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("F1.2: rejects toolCallId='../foo' with validation_error", { timeout: 15000 }, async () => {
+    const artifactId = await stageArtifact();
+    const fetchMock = vi.mocked(globalThis.fetch);
+    fetchMock.mockReset();
+
+    const result = (await exportArtifact({
+      artifactId, format: "step" as const,
+      paperclipTicketId: "PLA-56", toolCallId: "../foo",
+    })) as { error?: string; data?: { code?: string; message?: string } };
+    expect(result.error).toBe("validation_error");
+    expect(result.data?.message).toMatch(/toolCallId/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("F1.3: rejects filename='.github/workflows/x.yml' with validation_error", { timeout: 15000 }, async () => {
+    const artifactId = await stageArtifact();
+    const fetchMock = vi.mocked(globalThis.fetch);
+    fetchMock.mockReset();
+
+    const result = (await exportArtifact({
+      artifactId, format: "step" as const,
+      paperclipTicketId: "PLA-56", toolCallId: "call-x",
+      filename: ".github/workflows/x.yml",
+    })) as { error?: string; data?: { code?: string; message?: string } };
+    expect(result.error).toBe("validation_error");
+    expect(result.data?.message).toMatch(/filename/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("F1.4: rejects filename='../../escape' with validation_error", { timeout: 15000 }, async () => {
+    const artifactId = await stageArtifact();
+    const fetchMock = vi.mocked(globalThis.fetch);
+    fetchMock.mockReset();
+
+    const result = (await exportArtifact({
+      artifactId, format: "step" as const,
+      paperclipTicketId: "PLA-56", toolCallId: "call-x",
+      filename: "../../escape",
+    })) as { error?: string; data?: { code?: string; message?: string } };
+    expect(result.error).toBe("validation_error");
+    expect(result.data?.message).toMatch(/filename/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("F2.5: rejects paperclipTicketId with newline+'Closes #1' (commit-message injection)", { timeout: 15000 }, async () => {
+    const artifactId = await stageArtifact();
+    const fetchMock = vi.mocked(globalThis.fetch);
+    fetchMock.mockReset();
+
+    const result = (await exportArtifact({
+      artifactId, format: "step" as const,
+      paperclipTicketId: "PLA-1\nCloses #1", toolCallId: "call-x",
+    })) as { error?: string; data?: { code?: string; message?: string } };
+    expect(result.error).toBe("validation_error");
+    expect(result.data?.message).toMatch(/paperclipTicketId/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("F1.6: rejects paperclipTicketId='x; rm -rf' (broader allowlist coverage)", { timeout: 15000 }, async () => {
+    const artifactId = await stageArtifact();
+    const fetchMock = vi.mocked(globalThis.fetch);
+    fetchMock.mockReset();
+
+    const result = (await exportArtifact({
+      artifactId, format: "step" as const,
+      paperclipTicketId: "x; rm -rf", toolCallId: "call-x",
+    })) as { error?: string; data?: { code?: string; message?: string } };
+    expect(result.error).toBe("validation_error");
+    expect(result.data?.message).toMatch(/paperclipTicketId/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("F1.7: surviving inputs always produce repoPath starting with 'artifacts/'", { timeout: 15000 }, async () => {
+    const artifactId = await stageArtifact();
+    const fetchMock = vi.mocked(globalThis.fetch);
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce(ok200());     // prereq
+    fetchMock.mockResolvedValueOnce(notFound());  // idempotency
+    fetchMock.mockResolvedValueOnce(notFound());  // push GET
+    fetchMock.mockResolvedValueOnce(putOk("safesha"));
+
+    const result = (await exportArtifact({
+      artifactId, format: "stl" as const,
+      paperclipTicketId: "PLA-56", toolCallId: "call_x-1",
+      filename: "model.stl",
+    })) as { data?: { artifactPath?: string } };
+    expect(result.data?.artifactPath).toBe("artifacts/PLA-56/call_x-1/model.stl");
+    expect(result.data?.artifactPath?.startsWith("artifacts/")).toBe(true);
+  });
+
+  it("F1.8: constructed Contents API URL contains exactly the expected path (no '..', no host change)", { timeout: 15000 }, async () => {
+    const artifactId = await stageArtifact();
+    const fetchMock = vi.mocked(globalThis.fetch);
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce(ok200());     // prereq
+    fetchMock.mockResolvedValueOnce(notFound());  // idempotency
+    fetchMock.mockResolvedValueOnce(notFound());  // push GET
+    fetchMock.mockResolvedValueOnce(putOk("urlsha"));
+
+    await exportArtifact({
+      artifactId, format: "step" as const,
+      paperclipTicketId: "PLA-56", toolCallId: "abc",
+      filename: "part.step",
+    });
+
+    const allUrls = fetchMock.mock.calls.map((c) =>
+      typeof c[0] === "string" ? c[0] : (c[0] as Request).url,
+    );
+    // Every outbound call must hit api.github.com — no host smuggling.
+    for (const u of allUrls) {
+      expect(new URL(u).host).toBe("api.github.com");
+      expect(u).not.toMatch(/\.\./);
+    }
+    // The PUT URL is the authoritative target for the write — verify byte-shape.
+    const putCall = fetchMock.mock.calls.find((c) => (c[1] as RequestInit | undefined)?.method === "PUT");
+    expect(putCall).toBeDefined();
+    const putUrl = typeof putCall![0] === "string" ? putCall![0] : (putCall![0] as Request).url;
+    expect(putUrl).toContain("/contents/artifacts/PLA-56/abc/part.step");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PLA-74 F4 — strict URL parsing for parseGitHubUrl
+// ---------------------------------------------------------------------------
+
+describe("cad:export PLA-74 F4 — strict URL parsing", () => {
+  it("F4: rejects http:// (non-https) artifactRepoUrl with prerequisite_missing", { timeout: 15000 }, async () => {
+    vi.resetModules();
+    const { ctx: customCtx, handlers } = buildMockCtx("ghp_x", {
+      githubPatSecretId: "secret-x",
+      artifactRepoUrl: "http://github.com/o/r.git",
+    });
+    vi.stubGlobal("fetch", vi.fn());
+    const plugin2 = (await import("./worker.js")) as { default?: { setup?: (ctx: unknown) => Promise<void> } };
+    await plugin2.default?.setup?.(customCtx);
+
+    const runResult = (await handlers["cad:run_script"]({ script: BOX_SCRIPT }, DEFAULT_RUN_CTX)) as { data?: { artifactId?: string } };
+    const artifactId = runResult.data?.artifactId!;
+
+    const result = (await handlers["cad:export"]({
+      artifactId, format: "step" as const,
+      paperclipTicketId: "PLA-56", toolCallId: "call-1",
+    }, DEFAULT_RUN_CTX)) as { data?: { error?: string; message?: string } };
+    expect(result.data?.error).toBe("prerequisite_missing");
+    expect(result.data?.message).toMatch(/https:\/\/github\.com/);
+
+    vi.resetModules();
+  });
+
+  it("F4: rejects attacker URL whose path contains 'github.com/o/r.git'", { timeout: 15000 }, async () => {
+    vi.resetModules();
+    const { ctx: customCtx, handlers } = buildMockCtx("ghp_x", {
+      githubPatSecretId: "secret-x",
+      artifactRepoUrl: "https://attacker.example/path/github.com/o/r.git",
+    });
+    vi.stubGlobal("fetch", vi.fn());
+    const plugin2 = (await import("./worker.js")) as { default?: { setup?: (ctx: unknown) => Promise<void> } };
+    await plugin2.default?.setup?.(customCtx);
+
+    const runResult = (await handlers["cad:run_script"]({ script: BOX_SCRIPT }, DEFAULT_RUN_CTX)) as { data?: { artifactId?: string } };
+    const artifactId = runResult.data?.artifactId!;
+
+    const result = (await handlers["cad:export"]({
+      artifactId, format: "step" as const,
+      paperclipTicketId: "PLA-56", toolCallId: "call-1",
+    }, DEFAULT_RUN_CTX)) as { data?: { error?: string } };
+    expect(result.data?.error).toBe("prerequisite_missing");
+
+    vi.resetModules();
   });
 });
