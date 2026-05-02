@@ -323,13 +323,46 @@ jobs:
           # here (the smoke gate's job is to prove the seccomp install
           # itself works, not that the worker is bug-free).
           if [[ $rc -eq 159 ]]; then
-            echo "::error::bwrap+seccomp smoke killed by SIGSYS (exit 159) — see stderr above. The seccomp filter is denying a syscall the python bootstrap or cad_worker import path needs. The bwrap test matrix cannot pass while this is failing."
+            # SIGSYS — kernel logs an audit record naming the killed syscall.
+            # The audit record format on Linux is:
+            #   audit: type=1326 audit(...): auid=... uid=... pid=... comm="python3" exe="/usr/bin/python3" sig=31 arch=c000003e syscall=NN compat=0 ip=... code=0x0
+            # `syscall=NN` is the kill-trigger. We capture the last 50
+            # seccomp-related lines from dmesg so the diagnostic comment
+            # has the syscall number to look up.
+            echo "=== dmesg seccomp audit (post-SIGSYS) ==="
+            sudo dmesg | grep -E "seccomp|type=1326" | tail -50 | tee /tmp/cad-bwrap-smoke/dmesg-seccomp.log || echo "(no seccomp/audit lines in dmesg)"
+            echo "::error::bwrap+seccomp smoke killed by SIGSYS (exit 159) — see dmesg seccomp audit above for the killed syscall number. The bwrap test matrix cannot pass while this is failing."
             exit $rc
           fi
           if [[ $rcB -ne 0 ]]; then
             echo "::error::Phase B (python-side seccomp install) failed with exit $rcB — the loader shim cannot complete prctl(PR_SET_SECCOMP) on this runner. Investigate seccomp_load.py and the filter blob before the matrix runs."
             exit $rcB
           fi
+
+      - name: Post smoke-step SIGSYS dmesg on failure (diagnostic surface)
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = '/tmp/cad-bwrap-smoke/dmesg-seccomp.log';
+            const dmesg = fs.existsSync(path)
+              ? fs.readFileSync(path, 'utf8')
+              : '(no dmesg-seccomp.log produced — smoke step may not have reached the dmesg capture, or sudo dmesg returned no audit lines)';
+            // Look up the syscall number on x86_64. Common offenders post-
+            // lock_down: 165 mount, 167 swapon, 169 reboot, 92 chown, 90 chmod,
+            // 101 ptrace, 321 bpf, 425 io_uring_setup, 435 clone3, 56 clone,
+            // 59 execve, 322 execveat. The diagnostic comment includes the
+            // raw audit line so the reviewer can resolve the number directly.
+            const sha = '${{ github.event.pull_request.head.sha }}';
+            const url = '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}';
+            const trunc = dmesg.length > 50000 ? dmesg.slice(0, 50000) + '\n... (truncated)' : dmesg;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## CI smoke-step SIGSYS — diagnostic dump\n\nCommit: \`${sha}\`\nRun: ${url}\n\nKernel audit record naming the killed syscall (search \`syscall=N\`):\n\n<details><summary>dmesg | grep seccomp</summary>\n\n\`\`\`\n${trunc}\n\`\`\`\n\n</details>\n\nLook up the syscall number against \`/usr/include/asm/unistd_64.h\` or use \`ausyscall <NN>\` on the runner.`,
+            });
 
       - name: Build TypeScript bundles
         run: npm run build
