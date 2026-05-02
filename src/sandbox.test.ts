@@ -527,6 +527,251 @@ describe("PLA-76 — sandbox hardening", () => {
     }
   }, T);
 
+  // -------------------------------------------------------------------------
+  // PLA-75 R3 — sys.modules['os'].system(...) bypass blocked.
+  // Fix: _harden_post_init_imports replaces sys.modules['os'] with the
+  // _RestrictedOs proxy so dict-read of sys.modules['os'] also returns the
+  // proxy, not the real os module.
+  //
+  // Regression: must FAIL at eb1b9ad (sys.modules['os'] is the real os →
+  // os.system runs the shell → script falls through to "did not assign"
+  // script_error without PermissionError text).  Must PASS after R3 fix.
+  // -------------------------------------------------------------------------
+  it("sys.modules['os'].system → script_error with PermissionError (PLA-75 R3: real os via sys.modules blocked)", async () => {
+    const workdir = await freshWorkdir();
+    const script =
+      "import sys\n" +
+      "sys.modules['os'].system('true')\n" +
+      "result = None";
+
+    const result = await invokeWorker(
+      { script, format: "step", workdir },
+      DEFAULT_TIMEOUT_SECONDS,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("script_error");
+      // Post-fix: sys.modules['os'] is the proxy, .system raises
+      // PermissionError before the shell runs.  Pre-fix: real os → shell
+      // runs cleanly → script_error from "did not assign" with no
+      // PermissionError + os.system text.
+      expect(result.message).toMatch(/PermissionError/);
+      expect(result.message).toMatch(/os\.system/);
+    }
+  }, T);
+
+  // -------------------------------------------------------------------------
+  // PLA-75 R4 — Linux's `posix` C-level OS module bypass blocked.
+  // Fix: posix / nt / _posixsubprocess / pty added to _BLOCKED_MODULES_SET
+  // (rejected by _restricted_import), popped from sys.modules, and added to
+  // _META_PATH_BLOCKED in _harden_post_init_imports.
+  //
+  // Regression: must FAIL at eb1b9ad (posix not in any blocklist; user
+  // can `import posix; posix.system(...)` for direct shell access).
+  // Must PASS after R4 fix.
+  // -------------------------------------------------------------------------
+  it("import posix → script_error with ImportError (PLA-75 R4: posix C-level OS module blocked)", async () => {
+    const workdir = await freshWorkdir();
+    const script =
+      "import posix\n" +
+      "posix.system('true')\n" +
+      "result = None";
+
+    const result = await invokeWorker(
+      { script, format: "step", workdir },
+      DEFAULT_TIMEOUT_SECONDS,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("script_error");
+      // Post-fix: _restricted_import raises ImportError on `posix`.
+      // Pre-fix: import succeeds, posix.system runs the shell, then
+      // result=None falls through to a "did not assign" message which
+      // contains neither "ImportError" nor "posix".
+      expect(result.message).toMatch(/ImportError/);
+      expect(result.message).toMatch(/posix/);
+    }
+  }, T);
+
+  it("sys.modules['posix'] direct read → script_error with KeyError (PLA-75 R4: posix dict-read bypass blocked)", async () => {
+    const workdir = await freshWorkdir();
+    const script =
+      "import sys\n" +
+      "sys.modules['posix'].system('true')\n" +
+      "result = None";
+
+    const result = await invokeWorker(
+      { script, format: "step", workdir },
+      DEFAULT_TIMEOUT_SECONDS,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("script_error");
+      // Post-fix: posix is popped from sys.modules in
+      // _harden_post_init_imports, so dict-read raises KeyError: 'posix'.
+      // Pre-fix: sys.modules['posix'] is the real posix module, .system
+      // runs the shell, "did not assign" has no KeyError text.
+      expect(result.message).toMatch(/KeyError/);
+      expect(result.message).toMatch(/posix/);
+    }
+  }, T);
+
+  // -------------------------------------------------------------------------
+  // PLA-75 R5 — os._real_os attribute leak blocked.
+  // Fix: _RestrictedOs no longer stores the real os reference on its
+  // instance __dict__ (was: `object.__setattr__(self, "_real_os", os)`).
+  // The class now uses module-level _REAL_OS via __getattr__, so attribute
+  // access for `_real_os` falls through to __getattr__, which delegates to
+  // getattr(_REAL_OS, "_real_os") → AttributeError (real os has no such
+  // attribute).
+  //
+  // Regression: must FAIL at eb1b9ad (os._real_os returns the real os
+  // module; the test's script raises SystemError("R5_LEAK_REACHED") with
+  // the leaked module repr).  Must PASS after R5 fix.
+  // -------------------------------------------------------------------------
+  it("os._real_os attribute → AttributeError (PLA-75 R5: proxy __dict__ leak closed)", async () => {
+    const workdir = await freshWorkdir();
+    // Discriminator: when _real_os is leaked, the script raises
+    // SystemError with a marker the test can detect.  When the leak is
+    // closed, AttributeError is raised by the proxy and the script does
+    // NOT reach the SystemError.
+    const script = [
+      "import os",
+      "try:",
+      "    leaked = os._real_os",
+      "except AttributeError:",
+      "    leaked = None",
+      "if leaked is not None:",
+      "    raise SystemError(f'R5_LEAK_REACHED:{leaked!r}')",
+      "result = None",
+    ].join("\n");
+
+    const result = await invokeWorker(
+      { script, format: "step", workdir },
+      DEFAULT_TIMEOUT_SECONDS,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("script_error");
+      // Pre-fix: SystemError("R5_LEAK_REACHED:...") in message.
+      // Post-fix: AttributeError caught, leaked = None, fall through to
+      // "did not assign result" message — no R5_LEAK_REACHED text.
+      expect(result.message).not.toMatch(/R5_LEAK_REACHED/);
+    }
+  }, T);
+
+  // -------------------------------------------------------------------------
+  // PLA-75 R6 — vars(os) / os.__dict__ leak of _real_os blocked.
+  // Same root as R5: removing _real_os from the proxy's instance __dict__
+  // also closes vars()/__dict__ inspection.
+  //
+  // Regression: must FAIL at eb1b9ad (vars(os).get('_real_os') is the real
+  // os module).  Must PASS after R5/R6 refactor.
+  // -------------------------------------------------------------------------
+  it("vars(os)['_real_os'] → not present (PLA-75 R6: vars/__dict__ leak closed)", async () => {
+    const workdir = await freshWorkdir();
+    const script = [
+      "import os",
+      "leaked = vars(os).get('_real_os') or os.__dict__.get('_real_os')",
+      "if leaked is not None:",
+      "    raise SystemError(f'R6_LEAK_REACHED:{leaked!r}')",
+      "result = None",
+    ].join("\n");
+
+    const result = await invokeWorker(
+      { script, format: "step", workdir },
+      DEFAULT_TIMEOUT_SECONDS,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("script_error");
+      // Pre-fix: vars(os) contains _real_os → SystemError("R6_LEAK_REACHED").
+      // Post-fix: vars(os) does NOT contain _real_os → fall through to
+      // "did not assign result" — no R6_LEAK_REACHED text.
+      expect(result.message).not.toMatch(/R6_LEAK_REACHED/);
+    }
+  }, T);
+
+  // -------------------------------------------------------------------------
+  // PLA-75 R7 — cross-module __builtins__ leak of real __import__ blocked.
+  // Fix: _harden_builtins replaces _builtins.__import__ with
+  // _restricted_import, so any code path that reaches the real builtins
+  // module (via sys.modules['<any module>'].__builtins__) sees the
+  // restricted import — including `import('os')` calls that route through
+  // the user-frame's restricted __import__ via Python's auto-injection.
+  //
+  // Regression: must FAIL at eb1b9ad (sys.modules['cadquery'].__builtins__
+  // .__import__ is the real __import__; returns real os; os.system runs
+  // the shell; falls through to "did not assign" with no PermissionError
+  // text).  Must PASS after R7 fix.
+  // -------------------------------------------------------------------------
+  it("sys.modules['cadquery'].__builtins__['__import__'] → restricted (PLA-75 R7: cross-module builtins leak closed)", async () => {
+    const workdir = await freshWorkdir();
+    // Note: a non-__main__ module's `__builtins__` may be either the
+    // builtins module or its __dict__ depending on how it was loaded.
+    // The script accessor below works for both.
+    const script = [
+      "import cadquery as cq",
+      "import sys",
+      "rb = sys.modules['cadquery'].__builtins__",
+      "real_imp = rb['__import__'] if isinstance(rb, dict) else rb.__import__",
+      "shell_os = real_imp('os')",
+      "shell_os.system('true')",
+      "result = None",
+    ].join("\n");
+
+    const result = await invokeWorker(
+      { script, format: "step", workdir },
+      DEFAULT_TIMEOUT_SECONDS,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("script_error");
+      // Post-fix: real builtins.__import__ IS _restricted_import →
+      // returns the os proxy → .system raises PermissionError.
+      // Pre-fix: real __import__ → real os → shell runs → "did not
+      // assign" message contains no PermissionError + os.system text.
+      expect(result.message).toMatch(/PermissionError/);
+      expect(result.message).toMatch(/os\.system/);
+    }
+  }, T);
+
+  it("eval with empty globals → restricted __import__ (PLA-75 R7: eval auto-injection closed)", async () => {
+    const workdir = await freshWorkdir();
+    // Python auto-injects the real builtins module when globals lacks
+    // '__builtins__'.  After R7, real builtins.__import__ is restricted,
+    // so __import__('os') from inside eval returns the os proxy.
+    const script = [
+      "import cadquery as cq",
+      "import sys",
+      "rb = sys.modules['cadquery'].__builtins__",
+      "real_eval = rb['eval'] if isinstance(rb, dict) else rb.eval",
+      "real_eval(\"__import__('os').system('true')\", {})",
+      "result = None",
+    ].join("\n");
+
+    const result = await invokeWorker(
+      { script, format: "step", workdir },
+      DEFAULT_TIMEOUT_SECONDS,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("script_error");
+      // Post-fix: PermissionError raised inside eval'd expression.
+      // Pre-fix: eval runs real os.system, falls through to "did not
+      // assign", no PermissionError + os.system text.
+      expect(result.message).toMatch(/PermissionError/);
+      expect(result.message).toMatch(/os\.system/);
+    }
+  }, T);
+
   it("allocating >2 GB → worker_oom or process terminated (MEDIUM-1: RLIMIT_AS)", async () => {
     const workdir = await freshWorkdir();
     // 3 GiB allocation should exceed the 2 GiB RLIMIT_AS ceiling.

@@ -66,8 +66,29 @@ import traceback
 from types import ModuleType
 from typing import Any
 
-# Capture the real __import__ at module-load time, before any restrictions.
+# Capture the real __import__ and the real `os` module at module-load time,
+# before any restrictions or proxy swaps.  These references back the
+# _restricted_import / _RestrictedOs implementations and the worker's own
+# os.* operations (chdir / path.join / path.realpath / etc.).
+#
+# IMPORTANT: these references persist as cad_worker module globals; any code
+# path that can reach `sys.modules['__main__']._REAL_IMPORT` /
+# `sys.modules['__main__']._REAL_OS` would defeat the proxy.  Closing the
+# in-process Python escape surface for that gadget requires OS-level isolation
+# (Option B); see PLA-73 strategic note (2026-05-01).  This is a documented
+# residual risk in the Option A threat model.
 _REAL_IMPORT = _builtins.__import__
+_REAL_OS = os
+
+# Capture real compile / exec at module load.  These are used by the worker
+# to compile + run the user script once.  Captured here (rather than relying
+# on lookup at call time) for defensive reasons — if a future iteration of
+# _harden_builtins() reintroduces deniers on builtins.compile / builtins.exec,
+# the worker's own compile/exec call must still succeed.  The user's exec
+# namespace pops these names from its `__builtins__` dict so they remain
+# unreachable to user code.
+_REAL_COMPILE = _builtins.compile
+_REAL_EXEC = _builtins.exec
 
 # ---------------------------------------------------------------------------
 # Network restriction — library-restriction-based (PLA-54 AC6)
@@ -121,7 +142,27 @@ _BLOCKED_MODULES: list[str] = [
     "importlib.machinery",  # HIGH-1
     "multiprocessing",      # process spawning (belt-and-suspenders with subprocess)
     "threading",            # long-running thread escape from sandbox lifetime
+
+    # ---- Platform OS modules (PLA-75 R4) ----
+    # The C-level OS modules backing `os`.  `os` re-exports `system`, `popen`,
+    # `exec*`, `fork`, etc. from these modules.  Once `os` is loaded the
+    # bindings inside the `os` module's namespace are sufficient — no other
+    # code needs fresh access.  Blocking these here means user-script
+    # `import posix; posix.system(...)` is rejected by `_restricted_import`.
+    # _harden_post_init_imports() additionally pops them from sys.modules and
+    # adds them to _META_PATH_BLOCKED, so dict-read and re-import bypasses
+    # are also closed.
+    "posix",                # Linux / POSIX C extension exposing system/exec*/fork
+    "nt",                   # Windows equivalent
+    "_posixsubprocess",     # exposes fork_exec directly
+    "pty",                  # Pseudo-terminal: leaks fork() via openpty/fork
 ]
+
+# Modules that are blocked AFTER CadQuery init (rather than before), via
+# _harden_post_init_imports().  These are needed by Python / CadQuery during
+# their own startup, so we let them load through the normal import system,
+# then revoke access right before user code runs.
+_PLATFORM_OS_MODULES: tuple = ("posix", "nt", "_posixsubprocess", "pty")
 
 # Frozenset for O(1) lookup in _restricted_import and _BlockingMetaPathFinder.
 _BLOCKED_MODULES_SET: frozenset[str] = frozenset(_BLOCKED_MODULES)
@@ -141,9 +182,19 @@ _BLOCKED_MODULES_SET: frozenset[str] = frozenset(_BLOCKED_MODULES)
 #
 # threading is EXCLUDED: Python's runtime needs sys.modules['threading'] for
 # __del__ / atexit cleanup.  User-script imports are blocked by _restricted_import.
+#
+# _PLATFORM_OS_MODULES (posix/nt/_posixsubprocess/pty) are EXCLUDED: they are
+# already loaded at Python startup and the `os` module re-exports the bindings
+# it needs from them; CadQuery / OpenCASCADE may also lazily reach posix
+# during their own init.  _harden_post_init_imports() pops + meta-path-blocks
+# them after CadQuery is fully imported (PLA-75 R4).
 _SYS_MODULES_STUBS: list[str] = [
     m for m in _BLOCKED_MODULES
-    if not (m == "threading" or m.startswith(("ctypes", "importlib")))
+    if not (
+        m == "threading"
+        or m.startswith(("ctypes", "importlib"))
+        or m in _PLATFORM_OS_MODULES
+    )
 ]
 
 # Modules safe to intercept globally via sys.meta_path.
@@ -158,7 +209,10 @@ _SYS_MODULES_STUBS: list[str] = [
 # every find_spec call, so additions take effect for subsequent imports.
 _META_PATH_BLOCKED: set[str] = set(
     m for m in _BLOCKED_MODULES
-    if not m.startswith(("ctypes", "importlib"))
+    if not (
+        m.startswith(("ctypes", "importlib"))
+        or m in _PLATFORM_OS_MODULES
+    )
 )
 
 
@@ -267,25 +321,34 @@ _OS_BLOCKED_ATTRS: frozenset[str] = frozenset({
 
 class _RestrictedOs(ModuleType):
     """
-    Proxy for the real `os` module visible to user scripts only.
+    Proxy for the real `os` module visible to user scripts.
 
-    Reads (attribute access) for non-blocked names delegate to the real `os`
-    module captured at construction time.  Reads of blocked names raise
-    PermissionError so that the offending line raises BEFORE any side effect.
+    Reads of non-blocked names delegate to the real `os` module via the
+    module-level ``_REAL_OS`` reference (captured at module load).  Reads of
+    blocked names raise PermissionError so the offending line raises BEFORE
+    any side effect.
 
-    Why a proxy and not a sys.modules swap: the real `os` is required by the
-    Python runtime, by `tempfile`, by CadQuery, and by `_restricted_open`
-    itself.  Replacing sys.modules['os'] would corrupt those.  The proxy is
-    only injected into the exec namespace, leaving sys.modules untouched.
+    PLA-75 R5/R6 — the real os reference is NOT stored on the proxy instance.
+    A previous implementation used ``object.__setattr__(self, "_real_os", os)``,
+    which placed the real module in the proxy's ``__dict__`` and was reachable
+    via ``os._real_os`` (bypasses __getattr__) and ``vars(os)['_real_os']``.
+    The current design keeps the reference in module-level ``_REAL_OS`` and
+    routes attribute access through the class's __getattr__, so neither
+    direct attribute access nor dict introspection of the proxy can leak the
+    real module.
+
+    Why a proxy and not a sys.modules swap: kept for symmetry with the original
+    design, but PLA-75 R3 additionally swaps ``sys.modules['os']`` to point at
+    this same proxy (see _harden_post_init_imports).  The worker's own
+    ``import os`` global is captured at module load (``_REAL_OS``) and is not
+    affected by the swap.
     """
 
     __slots__ = ()
 
     def __init__(self) -> None:
         super().__init__("os")
-        # Capture the real os module under a private slot.  We use
-        # object.__setattr__ so writes don't go through ModuleType.__setattr__.
-        object.__setattr__(self, "_real_os", os)
+        # NOTE: deliberately no instance attributes.  See class docstring (R5/R6).
 
     def __getattr__(self, attr: str) -> Any:
         if attr in _OS_BLOCKED_ATTRS:
@@ -293,10 +356,14 @@ class _RestrictedOs(ModuleType):
                 f"[cad-worker] os.{attr} is not allowed inside the CadQuery "
                 f"sandbox (blocks shell/process escape — PLA-75 R1)."
             )
-        return getattr(object.__getattribute__(self, "_real_os"), attr)
+        # Fall through to the real os module via the module-level reference.
+        # AttributeError from getattr is propagated naturally (e.g. os._real_os
+        # raises AttributeError post-fix, which is the regression-test signal).
+        return getattr(_REAL_OS, attr)
 
     def __setattr__(self, attr: str, value: Any) -> None:
-        # Prevent user scripts from rebinding os.system etc. on the proxy.
+        # Prevent user scripts from rebinding os.system etc. on the proxy and
+        # from re-introducing a leaked _real_os attribute.
         raise PermissionError(
             f"[cad-worker] Cannot mutate os.{attr} inside the CadQuery sandbox."
         )
@@ -427,40 +494,131 @@ def _install_meta_path_blocker() -> None:
 
 def _harden_post_init_imports() -> None:
     """
-    PLA-75 R2: lock down ctypes after CadQuery's transitive imports resolve.
+    Lock down ctypes / posix / nt / _posixsubprocess / pty + redirect
+    sys.modules['os'] to the proxy after CadQuery's transitive imports resolve.
 
     CadQuery's OpenCASCADE bindings load via ctypes during cq init.  Once
     init is done, cq.* references hold direct callable bindings to the
     loaded C functions — they do NOT re-look-up via sys.modules['ctypes'],
-    so popping ctypes here is safe for subsequent CadQuery operations.
+    so popping ctypes here is safe for subsequent CadQuery operations.  The
+    same holds for posix / nt / _posixsubprocess / pty: `os` re-exports
+    `system`/`popen`/`exec*`/`fork`/etc. into its own namespace at import
+    time, so popping the C-level OS modules afterwards does not break the
+    proxy's delegation path.
 
-    Two layers, both required to fully close the bypass:
+    Three layers, all required to fully close the bypass classes:
 
-      1. Pop ctypes / ctypes.util / _ctypes from sys.modules.
-         Closes the direct dict-read bypass:
-             import sys
-             sys.modules['ctypes'].CDLL('libc.so.6').system(b'…')
+      1. Pop the cached modules from sys.modules (closes direct dict-read,
+         e.g. `sys.modules['ctypes'].CDLL(…)` and `sys.modules['posix'].system(…)`).
 
-      2. Add ctypes / ctypes.util / _ctypes to _META_PATH_BLOCKED so any
-         re-import attempt (via the real __import__, importlib machinery,
-         or any other code path that goes through the import system) is
-         intercepted by _BlockingMetaPathFinder and raises ImportError.
-         Closes the "pop and re-import" follow-up bypass.
+      2. Replace `sys.modules['os']` with the _RestrictedOs proxy
+         (PLA-75 R3 — closes `sys.modules['os'].system(…)`).  The worker's own
+         `os` global (captured at module load as _REAL_OS) is unaffected.
+
+      3. Add the popped names to _META_PATH_BLOCKED so any re-import attempt
+         (via the real __import__, importlib machinery, or any other code
+         path that goes through the import system) is intercepted by
+         _BlockingMetaPathFinder and raises ImportError.  Closes the
+         "pop and re-import" follow-up bypass.
 
     Residual risks (tracked, not blocked by this round):
       RR1: `sys.meta_path.clear()` from user code disables the blocker.
-      RR2: `import builtins; builtins.__import__('ctypes')` — `builtins` is
-           not stubbed; meta_path still catches the import, but the user can
-           also reach private finder internals.  OS-level isolation is the
-           proper long-term fix.
+      RR2: Any unblocked C extension exposing dlopen-equivalent behavior.
+      RR3: cad_worker module globals (_REAL_IMPORT, _REAL_OS) are reachable
+           via `sys.modules['__main__'].__dict__` / frame walking.  Closing
+           this requires either a refactor that puts these references in
+           closures OR OS-level isolation (Option B, see PLA-73 strategic
+           note).
     """
-    # Layer 1 — direct dict access: drop the cached ctypes modules so
-    #           sys.modules['ctypes'] raises KeyError.
-    for _name in ("ctypes", "ctypes.util", "_ctypes"):
+    # Layer 1 — direct dict access: drop the cached ctypes / platform-os
+    # modules so sys.modules['<name>'] raises KeyError on read.
+    _post_init_pops = ("ctypes", "ctypes.util", "_ctypes", *_PLATFORM_OS_MODULES)
+    for _name in _post_init_pops:
         sys.modules.pop(_name, None)
 
-    # Layer 2 — re-import path: extend the meta-path block list.
-    _META_PATH_BLOCKED.update({"ctypes", "ctypes.util", "_ctypes"})
+    # PLA-75 R3 — `sys.modules['os'].system(…)` bypass.  Replace the cached
+    # real `os` module in sys.modules with the proxy.  The worker's
+    # internal references (the module-level `os` import, captured as
+    # _REAL_OS) are untouched; CadQuery / OCP / tempfile / json / traceback
+    # all captured `os` at their own module load and are similarly unaffected.
+    sys.modules["os"] = _RESTRICTED_OS
+
+    # Layer 2 — re-import path: extend the meta-path block list to cover
+    # ctypes (PLA-75 R2) and the C-level OS modules (PLA-75 R4).
+    _META_PATH_BLOCKED.update({
+        "ctypes", "ctypes.util", "_ctypes",
+        *_PLATFORM_OS_MODULES,
+    })
+
+
+def _harden_builtins() -> None:
+    """
+    PLA-75 R7 — patch the real `builtins` module to neutralise the
+    "__builtins__ leak" attack surface.
+
+    Background.  Every pre-imported Python module has its `__builtins__`
+    attribute pointing at the real `builtins` module.  A user script can
+    therefore reach the real `__import__`, `eval`, `exec`, `compile`, etc.
+    via any other module:
+
+        import sys
+        real_imp = sys.modules['cadquery'].__builtins__.__import__
+        real_imp('os').system(...)            # → real os, real shell
+
+        json.__builtins__.eval(
+            "__import__('os').system(...)",
+            {},                                # auto-injects real builtins
+        )
+
+    The exec-namespace `__builtins__` dict (set up by `_run_script`) does NOT
+    block these paths because they go through the *real* builtins module, not
+    the user-frame's restricted dict.
+
+    Defence.  Replace `_builtins.__import__` with `_restricted_import` so
+    that EVERY path to the real `__import__` (cross-module __builtins__,
+    eval-with-empty-globals, frame-walking, …) enforces the same blocklist
+    + os proxy logic.  After this patch:
+
+      - `eval(code, {})` auto-injects real builtins; the `__import__` lookup
+        inside the compiled bytecode resolves to `_restricted_import`, so
+        `__import__('os')` returns the `_RestrictedOs` proxy.
+      - `exec("...", explicit_globals)` similarly uses `_restricted_import`
+        whether or not the caller supplies a `__builtins__` key.
+      - `sys.modules['<any module>'].__builtins__.__import__('os')` → proxy.
+
+    eval / exec / compile / breakpoint / input themselves are LEFT IN PLACE
+    on the real builtins module because:
+
+      - CadQuery's `multimethod` dependency calls `typing.get_type_hints()`
+        which calls `compile()` on forward-reference strings during
+        operations like `cq.Workplane('XY').box(...)`; replacing compile
+        breaks all CadQuery geometry.
+      - `eval` / `exec` are reached lazily by various stdlib code paths
+        (typing, dataclasses, …).
+      - With `__import__` restricted, eval/exec/compile cannot reach the
+        real `os` module, so they no longer enable shell escape — they
+        only enable arbitrary in-sandbox Python (which the user already has
+        via the exec'd script).
+
+    Ordering.  Must run AFTER CadQuery's transitive imports complete (so
+    `import` statements during cq init use the real, unrestricted import
+    machinery) and BEFORE the user script is exec()'d.
+
+    Residual risks (still open):
+
+      - sys.meta_path.clear() (RR1) — independent of builtins.
+      - cad_worker module globals (_REAL_IMPORT, _REAL_OS, _REAL_COMPILE,
+        _REAL_EXEC) are reachable via `sys.modules['__main__'].__dict__` /
+        frame walking.  Closing this requires either a closure refactor or
+        OS-level isolation (Option B, see PLA-73 strategic note).
+      - R8 (subclass-walk gadget) — out of scope for this round per the
+        SecurityEngineer's review.
+    """
+    # Replace the real __import__ so any code path that reaches it (via
+    # real builtins module, via sys.modules['cadquery'].__builtins__, via
+    # `eval(code, {})`, etc.) goes through the same blocklist + os proxy
+    # logic the user-frame's _restricted_builtins already uses.
+    _builtins.__import__ = _restricted_import
 
 
 # ---------------------------------------------------------------------------
@@ -528,6 +686,14 @@ def _run_script(script: str, fmt: str, workdir: str) -> dict:
     # Install module stubs in sys.modules (network + process-escape modules).
     _install_network_block()
 
+    # PLA-75 R7: patch the real `builtins` module so cross-module __builtins__
+    # access cannot reach the unrestricted `__import__` / `eval` / `exec` /
+    # `compile` / `breakpoint` / `input`.  MUST run AFTER CadQuery init (so
+    # cq's init can use the real eval/compile if it needs them) and AFTER
+    # _install_network_block / _install_meta_path_blocker (so any builtin
+    # invocation that triggers an import sees the restricted state).
+    _harden_builtins()
+
     # Build restricted __builtins__ for the exec namespace (PLA-76 CRITICAL-3).
     # Removes eval/exec/compile/breakpoint/input, replaces __import__ with
     # _restricted_import (enforces _BLOCKED_MODULES_SET) and open with
@@ -539,9 +705,13 @@ def _run_script(script: str, fmt: str, workdir: str) -> dict:
     _restricted_builtins["open"] = _restricted_open(os.path.realpath(workdir))
 
     # Execute the user script in a namespace with restricted builtins.
+    # Use the module-level _REAL_COMPILE / _REAL_EXEC captured at module
+    # load — defensive pattern matching _REAL_IMPORT / _REAL_OS so that any
+    # future _harden_builtins() variant which deniers compile/exec doesn't
+    # break the worker's own one-shot compile/exec call.
     ns: dict = {"__builtins__": _restricted_builtins}
     try:
-        exec(compile(script, "<cad_script>", "exec"), ns)  # noqa: S102
+        _REAL_EXEC(_REAL_COMPILE(script, "<cad_script>", "exec"), ns)  # noqa: S102
     except MemoryError:
         return {
             "ok": False,
