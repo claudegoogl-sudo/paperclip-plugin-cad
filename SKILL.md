@@ -57,16 +57,17 @@ Execute a CadQuery Python script string in an isolated subprocess. Returns a sta
 
 ### `cad:export`
 
-Export a previously staged CAD artifact to a specific file format. Returns the file path within the plugin artifact-staging area.
-
-> **Note:** `filePath` is a local staging path, not a URL. The artifact-persistence pipeline (sub-goal 5 of [PLA-32](/PLA/issues/PLA-32)) will wire download/commit flows.
+Export a previously staged CAD artifact to a specific file format and commit it to the configured GitHub artifact repository. Artifact path is deterministic: `artifacts/{paperclipTicketId}/{toolCallId}/{filename}`. Idempotent: re-calling with the same `toolCallId` returns the existing commit info.
 
 #### Input schema
 
-| Field        | Type   | Required | Description |
-|--------------|--------|----------|-------------|
-| `artifactId` | string | yes      | Artifact ID returned by `cad:run_script`. |
-| `format`     | string | yes      | Output file format: `"step"`, `"stl"`, or `"3mf"`. |
+| Field               | Type   | Required | Description |
+|---------------------|--------|----------|-------------|
+| `artifactId`        | string | yes      | Artifact ID returned by `cad:run_script`. |
+| `format`            | string | yes      | Output file format: `"step"`, `"stl"`, or `"3mf"`. |
+| `paperclipTicketId` | string | yes      | Paperclip ticket ID (e.g. `PLA-56`). Used in artifact path and commit message. |
+| `toolCallId`        | string | yes      | Unique ID for this tool call. Used for deterministic artifact path and idempotency. |
+| `filename`          | string | no       | Optional artifact filename. Defaults to `artifact.<format>`. |
 
 ```json
 {
@@ -80,10 +81,21 @@ Export a previously staged CAD artifact to a specific file format. Returns the f
       "type": "string",
       "enum": ["step", "stl", "3mf"],
       "description": "Output file format."
+    },
+    "paperclipTicketId": {
+      "type": "string",
+      "description": "Paperclip ticket ID (e.g. PLA-56). Used in artifact path and commit message."
+    },
+    "toolCallId": {
+      "type": "string",
+      "description": "Unique ID for this tool call. Used for deterministic artifact path and idempotency."
+    },
+    "filename": {
+      "type": "string",
+      "description": "Optional artifact filename. Defaults to 'artifact.<format>'."
     }
   },
-  "required": ["artifactId", "format"],
-  "additionalProperties": false
+  "required": ["artifactId", "format", "paperclipTicketId", "toolCallId"]
 }
 ```
 
@@ -91,13 +103,19 @@ Export a previously staged CAD artifact to a specific file format. Returns the f
 
 ```json
 {
-  "filePath": "/var/paperclip/artifacts/cad-artifact-<uuid>.step"
+  "commitSha": "abc123def456...",
+  "permalink": "https://github.com/<owner>/<repo>/blob/abc123def456.../artifacts/PLA-56/<toolCallId>/artifact.step",
+  "artifactPath": "artifacts/PLA-56/<toolCallId>/artifact.step"
 }
 ```
 
-| Field      | Type   | Description |
-|------------|--------|-------------|
-| `filePath` | string | Absolute path to the exported file in the plugin artifact-staging area. |
+| Field          | Type   | Description |
+|----------------|--------|-------------|
+| `commitSha`    | string | GitHub commit SHA for the export. |
+| `permalink`    | string | GitHub permalink (blob URL pinned to `commitSha`) for the artifact. |
+| `artifactPath` | string | Path within the artifact repository: `artifacts/{paperclipTicketId}/{toolCallId}/{filename}`. |
+
+> **Note:** When the worker runs without tenant context (test/local fallback at `worker.ts:451`), `cad:export` returns `{ filePath, ... }` instead. Production agent calls always go down the GitHub-commit path above.
 
 ---
 
@@ -126,13 +144,20 @@ Tool call: cad:run_script
 }
 → { "artifactId": "cad-artifact-a1b2c3d4", "summary": "Box 40×20×5 mm with Ø4 hole" }
 
-# Step 2 — export to STEP
+# Step 2 — export to STEP and commit to GitHub
 Tool call: cad:export
 {
   "artifactId": "cad-artifact-a1b2c3d4",
-  "format": "step"
+  "format": "step",
+  "paperclipTicketId": "PLA-56",
+  "toolCallId": "tc-9f8e7d6c",
+  "filename": "bracket.step"
 }
-→ { "filePath": "/var/paperclip/artifacts/cad-artifact-a1b2c3d4.step" }
+→ {
+    "commitSha": "abc123def456...",
+    "permalink": "https://github.com/<owner>/<repo>/blob/abc123def456.../artifacts/PLA-56/tc-9f8e7d6c/bracket.step",
+    "artifactPath": "artifacts/PLA-56/tc-9f8e7d6c/bracket.step"
+  }
 ```
 
 **CadQuery tutorial:** Out of scope for v0.1.0. See the [CadQuery documentation](https://cadquery.readthedocs.io/) for the scripting API.

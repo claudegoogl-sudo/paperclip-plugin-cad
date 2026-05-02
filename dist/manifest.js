@@ -21,6 +21,19 @@ var manifest = {
   entrypoints: {
     worker: "./dist/worker.js"
   },
+  // PLA-114 §5.2 — host-side kernel-sandbox capability negotiation.
+  runtimeRequirements: {
+    kernelSandbox: "bubblewrap"
+  },
+  // PLA-114 acceptance — pin the seccomp filter blob digest. The build
+  // script reads `worker/seccomp_filter.bpf.sha256` (produced by
+  // `make -C worker`) and substitutes the value here at build time. The
+  // literal below is a placeholder; an unsubstituted placeholder failing
+  // a sha256 length check at startup is the intended fail-closed signal.
+  worker: {
+    seccompFilterPath: "./worker/seccomp_filter.bpf",
+    seccompFilterSha256: "__PLA114_SECCOMP_FILTER_SHA256__"
+  },
   // instanceConfigSchema — ties secret-scope strictly to githubPatSecretId
   // (PLA-41 remediation #2). Fields validated by the host before plugin load.
   instanceConfigSchema: {
