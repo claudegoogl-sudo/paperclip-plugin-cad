@@ -167,15 +167,28 @@ for _ in range(4):
     t.join()
 PY
 )"
-  local bootstrap="import sys; sys.path.insert(0, '/sandbox'); from seccomp_load import lock_down; lock_down('/sandbox/seccomp_filter.bpf'); ${probe_expr}"
-  # strace -c aggregates counts; -f follows the python child created by
-  # bwrap. We invoke strace OUTSIDE bwrap (tracing bwrap+python) because
-  # ptrace(2) is denied by the filter; the trace is on the host side,
-  # observing syscalls from the sandboxed task via the kernel's ptrace
-  # accounting. strace -c emits an ascii table to stderr.
+  # Step 3 measures glibc's nptl clone3->ENOSYS->clone(2) fallback under
+  # the **production seccomp filter** (per file docstring line 4-7). The
+  # filter is applied by `lock_down()` via prctl, which works identically
+  # whether or not bwrap wraps the process — bwrap provides fs/namespace
+  # isolation, which is orthogonal to the §6.4 measurement.
+  #
+  # Tracing INSIDE bwrap with `strace -f` forces strace to count bwrap's
+  # own setup clones (`CLONE_NEWUSER`, `CLONE_NEWNS`, `CLONE_NEWPID`, etc.
+  # plus the privileged-setup helper fork), which are non-load-bearing
+  # for §6.4 but inflate `clone2_count` beyond the 4-per-thread
+  # expectation. CI run 25259114651 produced (1,6) — clone3 attempted=1
+  # (ENOSYS, glibc cached), clone2=6 (4 from threads + 2 from bwrap
+  # setup) — semantically valid but rejected by strict (1,4) verdict.
+  #
+  # Fix: trace python directly with host-side paths to the filter blob
+  # and the loader shim. The bwrap layer is verified by NEW16 and the
+  # workflow smoke step; §6.4 specifically isolates the glibc fallback
+  # behavior under the filter.
+  local bootstrap="import sys; sys.path.insert(0, '${WORKER_DIR}'); from seccomp_load import lock_down; lock_down('${FILTER_BPF}'); ${probe_expr}"
   set +e
   strace -f -c -e trace=clone,clone3 -o "$TMPDIR/n4.trace" \
-    "${bwrap_argv[@]}" -- /usr/bin/python3 -c "$bootstrap"
+    /usr/bin/python3 -c "$bootstrap"
   local rc=$?
   set -e
   if [[ $rc -ne 0 ]]; then
