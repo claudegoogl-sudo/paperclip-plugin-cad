@@ -180,3 +180,78 @@ PLA-114 changes to `.github/workflows/sandbox.yml` and `.devcontainer/Dockerfile
 ensure has both packages). The §2.1 strace evidence above (which does
 **not** require the filter loaded) was captured locally and is the input
 to `PTHREAD_CLONE_FLAGS`.
+
+---
+
+## §6.5 First-deploy ENOSYS coverage — runtime startup probe (PLA-137)
+
+The §6.4 evidence above is captured on the GitHub-hosted CI runner
+(Ubuntu 24.04 / glibc 2.39 / Python 3.12). SecurityEngineer accepted that
+row as the deploy-class proxy in
+[PLA-115#a3d8b717](/PLA/issues/PLA-115#comment-a3d8b717-c012-4373-b6eb-97cb52444042),
+on the explicit condition that the *first-deploy* environment delta is
+covered separately. The runtime canary `NEW14` in `src/sandbox.bwrap.test.ts`
+catches a *future* glibc regression at CI time but cannot catch a
+*first-deploy* host whose glibc/Python differs from the CI runner.
+
+[PLA-137](/PLA/issues/PLA-137) Path B closes that gap with a runtime
+startup self-test wired into the worker boot sequence:
+
+- Module: `src/clone-fallback-probe.ts`. Exports
+  `runCloneFallbackProbe(decision)` which spawns two short-lived
+  bwrap+seccomp processes under the production filter blob and asserts:
+  - **Step 1** (`clone3`) — `errno == ENOSYS` (filter rule
+    `SCMP_ACT_ERRNO(ENOSYS)` is in effect).
+  - **Step 2** (`clone(SIGCHLD, 0)`) — process killed by `SIGSYS` (filter
+    rule `SCMP_ACT_KILL_PROCESS` for `clone arg0 != PTHREAD_CLONE_FLAGS`
+    is in effect). `SIGKILL` with an audit-style "seccomp" stderr line is
+    accepted as kernel-equivalent per spec §4 discriminator.
+- Wiring: `src/worker.ts` `setup()` calls the probe **before** any tool
+  is registered, gated to `decision.mode === "bwrap+seccomp"`. On
+  failure the worker logs `sandbox.clone_fallback_probe FAILED` at
+  `error` level and calls `process.exit(1)` (fail-closed at boot — no
+  tool is registered).
+- On success the worker emits one
+  `sandbox.clone_fallback_probe ok glibc=… python=… arch=… clone3ErrnoName=ENOSYS clone2ExitSignal=SIGSYS`
+  INFO line per process start. That line is the durable §6.5 evidence:
+  it is queryable from the deploy logs (correlate by `runId` /
+  `correlationId` from the surrounding worker boot lines) and confirms
+  the §6.4 invariants on the actual production host's libc/Python on
+  every boot.
+- Gating: `dev_direct` (CAD_WORKER_UNSAFE_DEV=1, non-prod) emits
+  `sandbox.clone_fallback_probe skipped (kernel sandbox not active)` at
+  WARN; bwrap+seccomp is the only path that runs the probe.
+
+### Reading the AC literally vs the semantic intent
+
+[PLA-137](/PLA/issues/PLA-137) Path B AC reads:
+
+> invoke flag-checked `clone(2)` once with `PTHREAD_CLONE_FLAGS`, assert
+> `SIGSYS`.
+
+That input does **not** produce `SIGSYS` against the spec rev 3 filter —
+the filter explicitly *allows* `clone(2)` when arg0 ==
+`PTHREAD_CLONE_FLAGS` (the whole point of §2.1). The probe instead calls
+`clone(SIGCHLD, 0)` (a fork-style non-pthread invocation) which DOES
+produce `SIGSYS` via the `arg0 != PTHREAD_CLONE_FLAGS` kill rule. This
+matches spec NEW15 ("chained `clone3(SIGCHLD)` → ENOSYS, `clone(SIGCHLD)`
+→ SIGSYS"). The deviation is intentional and documented inline in
+`src/clone-fallback-probe.ts` for reviewer audit.
+
+### Tests
+
+| File | Coverage |
+| --- | --- |
+| `src/clone-fallback-probe.test.ts` | DI-stubbed unit suite (10 cases): success path, EPERM/wrong-errno fail, rc != -1 fail, clone3 dies via SIGSYS fail, clone2 survives fail, SIGKILL-with-audit-text accepted, unparseable JSON, spawn throw, dev_direct config-fail. Plus one bwrap-gated integration case. |
+| `src/worker.probe.test.ts` | Worker setup() wiring (3 cases): probe ok → tools registered + INFO line; probe fail → `process.exit(1)` called + ERROR line + zero tool registrations; dev_direct → probe skipped + WARN line + tools still registered. |
+
+### How [PLA-115](/PLA/issues/PLA-115) sign-off can cite this
+
+The §6.5 self-test runs on **every** worker process start in production.
+A successful first deploy will emit the
+`sandbox.clone_fallback_probe ok glibc=… python=… …` INFO line in the
+plugin worker's stderr stream; absence of that line (or presence of the
+matching ERROR + non-zero exit) is the deploy-time discriminator
+SecurityEngineer flagged as missing. No separate pre-deploy host-class
+re-measurement is required (Path B was preferred over Path A in the
+[PLA-137](/PLA/issues/PLA-137) AC for this reason).

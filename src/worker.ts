@@ -29,8 +29,12 @@ import type { PluginContext } from "@paperclipai/plugin-sdk";
 // INTEGRATION SWITCH (sub-goal 2 / PLA-54): real CadQuery sandbox client.
 import {
   renderCadQuery,
+  selectSpawnMode,
   DEFAULT_TIMEOUT_SECONDS as WORKER_DEFAULT_TIMEOUT,
 } from "./cad-worker-client.js";
+
+// PLA-137 deploy-time clone-fallback self-test.
+import { runCloneFallbackProbe } from "./clone-fallback-probe.js";
 
 // ---------------------------------------------------------------------------
 // Config shape
@@ -269,6 +273,50 @@ const plugin = definePlugin({
   async setup(ctx: PluginContext) {
     ctx.logger.info("CAD plugin worker starting");
     const anyCtx = ctx as AnyCtx;
+
+    // ------------------------------------------------------------------
+    // PLA-137 — deploy-time clone3-fallback self-test (Path B).
+    //
+    // Runs once at boot, BEFORE any tool is registered, against the
+    // production seccomp filter. Asserts:
+    //   1. clone3 returns errno=ENOSYS on this host's glibc.
+    //   2. clone(SIGCHLD) is killed with SIGSYS by the filter.
+    // On failure: log error and process.exit(1) (fail-closed).
+    // Gated to bwrap+seccomp mode; dev_direct (CAD_WORKER_UNSAFE_DEV=1,
+    // non-prod) skips the probe with a WARN line.
+    // ------------------------------------------------------------------
+    {
+      const decision = selectSpawnMode();
+      if (decision.mode !== "bwrap+seccomp") {
+        ctx.logger.warn(
+          "sandbox.clone_fallback_probe skipped (kernel sandbox not active)",
+          { mode: decision.mode },
+        );
+      } else {
+        const probe = await runCloneFallbackProbe(decision);
+        if (!probe.ok) {
+          ctx.logger.error(
+            "sandbox.clone_fallback_probe FAILED — refusing to register tools",
+            {
+              step: probe.step,
+              message: probe.message,
+              observed: probe.observed,
+            },
+          );
+          // Fail-closed: exit non-zero before accepting any plugin work.
+          // No tool registration runs after this line.
+          process.exit(1);
+        }
+        ctx.logger.info("sandbox.clone_fallback_probe ok", {
+          glibc: probe.glibc,
+          python: probe.python,
+          arch: probe.arch,
+          clone3Errno: probe.clone3Errno,
+          clone3ErrnoName: probe.clone3ErrnoName,
+          clone2ExitSignal: probe.clone2ExitSignal,
+        });
+      }
+    }
 
     // ------------------------------------------------------------------
     // cad:run_script

@@ -372,6 +372,273 @@ async function renderCadQuery(script, format, timeoutSeconds = DEFAULT_TIMEOUT_S
   return invokeWorker({ script, format, workdir }, effectiveTimeout, decision);
 }
 
+// src/clone-fallback-probe.ts
+import { spawn as defaultSpawn } from "node:child_process";
+import { openSync as defaultOpenSync, closeSync as defaultCloseSync } from "node:fs";
+import { mkdtemp as mkdtemp2 } from "node:fs/promises";
+import { tmpdir as tmpdir3 } from "node:os";
+import { join as join3 } from "node:path";
+var PYTHON_PROBE_CLONE3 = `
+import ctypes, errno as _errno, json, platform, sys
+_libc = ctypes.CDLL(None, use_errno=True)
+_SYS_clone3 = 435
+# struct clone_args v0 = 8 u64 fields = 64 bytes; index 4 = exit_signal.
+_buf = (ctypes.c_uint64 * 8)(0,0,0,0,17,0,0,0)  # 17 = SIGCHLD
+ctypes.set_errno(0)
+_rc = _libc.syscall(_SYS_clone3, ctypes.byref(_buf), ctypes.c_size_t(64))
+_e = ctypes.get_errno()
+_glibc_pair = platform.libc_ver()
+_glibc = "-".join(p for p in _glibc_pair if p) or "unknown"
+print(json.dumps({
+    "step": "clone3",
+    "rc": int(_rc),
+    "errno": int(_e),
+    "errno_name": _errno.errorcode.get(_e, str(_e)),
+    "glibc": _glibc,
+    "python": platform.python_version(),
+    "arch": platform.machine(),
+}), flush=True)
+sys.exit(0)
+`.trim();
+var PYTHON_PROBE_CLONE2 = `
+import ctypes, json, platform, sys
+_arch = platform.machine()
+_SYS_clone = {"x86_64": 56, "aarch64": 220, "riscv64": 220}.get(_arch)
+if _SYS_clone is None:
+    print(json.dumps({"step": "clone2", "error": "unsupported_arch", "arch": _arch}), flush=True)
+    sys.exit(3)
+_libc = ctypes.CDLL(None, use_errno=True)
+# clone(SIGCHLD, 0) \u2014 fork-style, no PTHREAD flags. Filter rule
+# SCMP_ACT_KILL_PROCESS when arg0 != PTHREAD_CLONE_FLAGS must fire.
+_libc.syscall(_SYS_clone, 17, 0)  # 17 = SIGCHLD
+print(json.dumps({"step": "clone2", "error": "UNEXPECTED_SURVIVED", "arch": _arch}), flush=True)
+sys.exit(2)
+`.trim();
+function buildProbeArgv({ workdir, python, pythonScript }) {
+  return [
+    "--unshare-all",
+    "--share-net=false",
+    "--die-with-parent",
+    "--new-session",
+    "--clearenv",
+    "--setenv",
+    "PATH",
+    "/usr/bin:/bin",
+    "--setenv",
+    "LANG",
+    "C.UTF-8",
+    "--setenv",
+    "PYTHONUNBUFFERED",
+    "1",
+    "--setenv",
+    "PYTHONDONTWRITEBYTECODE",
+    "1",
+    "--uid",
+    "65534",
+    "--gid",
+    "65534",
+    "--hostname",
+    "cad-probe",
+    "--proc",
+    "/proc",
+    "--dev",
+    "/dev",
+    "--ro-bind",
+    "/usr",
+    "/usr",
+    "--ro-bind",
+    "/lib",
+    "/lib",
+    "--ro-bind",
+    "/lib64",
+    "/lib64",
+    "--ro-bind",
+    "/bin",
+    "/bin",
+    "--ro-bind",
+    "/etc/ld.so.cache",
+    "/etc/ld.so.cache",
+    "--tmpfs",
+    "/tmp",
+    "--bind",
+    workdir,
+    workdir,
+    "--chdir",
+    workdir,
+    "--cap-drop",
+    "ALL",
+    "--seccomp",
+    "3",
+    "--",
+    python,
+    "-c",
+    pythonScript
+  ];
+}
+async function runOneProbe(decision, pythonScript, options, deps) {
+  const seccompFd = deps.openSync(decision.seccompFilterPath, "r");
+  let closed = false;
+  const closeFd = () => {
+    if (closed) return;
+    closed = true;
+    try {
+      deps.closeSync(seccompFd);
+    } catch {
+    }
+  };
+  try {
+    const argv = buildProbeArgv({
+      workdir: options.workdir,
+      python: options.python,
+      pythonScript
+    });
+    return await new Promise((resolve, reject) => {
+      let child;
+      try {
+        child = deps.spawn(decision.bwrapPath, argv, {
+          stdio: [
+            "ignore",
+            "pipe",
+            "pipe",
+            { type: "fd", fd: seccompFd }
+          ],
+          env: { PATH: "/usr/bin:/bin" }
+        });
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      closeFd();
+      let stdout = "";
+      let stderr = "";
+      let killTimer = setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+        }
+      }, options.timeoutMs);
+      child.stdout?.on("data", (b) => {
+        stdout += b.toString("utf8");
+      });
+      child.stderr?.on("data", (b) => {
+        stderr += b.toString("utf8");
+      });
+      child.on("error", (err) => {
+        if (killTimer) {
+          clearTimeout(killTimer);
+          killTimer = null;
+        }
+        reject(err);
+      });
+      child.on("close", (code, signal) => {
+        if (killTimer) {
+          clearTimeout(killTimer);
+          killTimer = null;
+        }
+        resolve({ stdout, stderr, signal, code });
+      });
+    });
+  } finally {
+    closeFd();
+  }
+}
+async function runCloneFallbackProbe(decision, options = {}) {
+  if (decision.mode !== "bwrap+seccomp") {
+    return {
+      ok: false,
+      step: "config",
+      message: `clone-fallback probe requires bwrap+seccomp mode (got ${decision.mode}). Probe is gated to skip in dev_direct; this error is returned only if a non-bwrap decision is passed in by mistake.`
+    };
+  }
+  if (!decision.bwrapPath || !decision.seccompFilterPath) {
+    return {
+      ok: false,
+      step: "config",
+      message: "decision missing bwrapPath or seccompFilterPath"
+    };
+  }
+  const deps = {
+    spawn: options.deps?.spawn ?? defaultSpawn,
+    openSync: options.deps?.openSync ?? defaultOpenSync,
+    closeSync: options.deps?.closeSync ?? defaultCloseSync
+  };
+  const python = options.python ?? "python3";
+  const timeoutMs = options.timeoutMs ?? 1e4;
+  const workdir = options.workdir ?? await mkdtemp2(join3(tmpdir3(), "cad-probe-"));
+  const opts = { python, workdir, timeoutMs };
+  let r1;
+  try {
+    r1 = await runOneProbe(decision, PYTHON_PROBE_CLONE3, opts, deps);
+  } catch (err) {
+    return {
+      ok: false,
+      step: "spawn",
+      message: `clone3 probe spawn failed: ${err.message}`
+    };
+  }
+  if (r1.signal !== null) {
+    return {
+      ok: false,
+      step: "clone3",
+      message: `clone3 probe exited via signal ${r1.signal} (expected normal exit). If SIGSYS, the filter is killing clone3 instead of returning ENOSYS \u2014 the glibc fallback chain is broken on this host.`,
+      observed: { signal: r1.signal, code: r1.code, stderrTail: r1.stderr.slice(-300) }
+    };
+  }
+  const lastLine = r1.stdout.trim().split("\n").pop() ?? "";
+  let parsed;
+  try {
+    parsed = JSON.parse(lastLine);
+  } catch {
+    return {
+      ok: false,
+      step: "clone3",
+      message: `clone3 probe stdout was not valid JSON: ${lastLine.slice(0, 300)}`,
+      observed: { code: r1.code, signal: r1.signal, stderrTail: r1.stderr.slice(-300) }
+    };
+  }
+  if (parsed.rc !== -1 || parsed.errno_name !== "ENOSYS") {
+    return {
+      ok: false,
+      step: "clone3",
+      message: `clone3 returned rc=${parsed.rc} errno=${parsed.errno_name} (expected rc=-1 errno=ENOSYS). glibc=${parsed.glibc} python=${parsed.python} arch=${parsed.arch}. Filter rule SCMP_ACT_ERRNO(ENOSYS) is not in effect on this host.`,
+      observed: { rc: parsed.rc, errno: parsed.errno, errnoName: parsed.errno_name }
+    };
+  }
+  let r2;
+  try {
+    r2 = await runOneProbe(decision, PYTHON_PROBE_CLONE2, opts, deps);
+  } catch (err) {
+    return {
+      ok: false,
+      step: "spawn",
+      message: `clone(2) probe spawn failed: ${err.message}`
+    };
+  }
+  const isSigsys = r2.signal === "SIGSYS";
+  const isKernelKillFallback = r2.signal === "SIGKILL" && /seccomp/i.test(r2.stderr);
+  if (!isSigsys && !isKernelKillFallback) {
+    return {
+      ok: false,
+      step: "clone2",
+      message: `clone(SIGCHLD) did not produce SIGSYS (got signal=${r2.signal} code=${r2.code}). Filter rule SCMP_ACT_KILL_PROCESS for clone arg0 != PTHREAD_CLONE_FLAGS is not in effect on this host. stdout=${r2.stdout.slice(0, 200)}`,
+      observed: {
+        signal: r2.signal,
+        code: r2.code,
+        stderrTail: r2.stderr.slice(-300)
+      }
+    };
+  }
+  return {
+    ok: true,
+    glibc: parsed.glibc,
+    python: parsed.python,
+    arch: parsed.arch,
+    clone3Errno: parsed.errno,
+    clone3ErrnoName: parsed.errno_name,
+    clone2ExitSignal: r2.signal ?? "SIGKILL"
+  };
+}
+
 // src/worker.ts
 var DEFAULT_ARTIFACT_REPO_URL = "https://github.com/claudegoogl-sudo/cad-artifacts.git";
 var DEFAULT_ARTIFACT_BRANCH = "main";
@@ -537,6 +804,36 @@ var plugin = definePlugin({
   async setup(ctx) {
     ctx.logger.info("CAD plugin worker starting");
     const anyCtx = ctx;
+    {
+      const decision = selectSpawnMode();
+      if (decision.mode !== "bwrap+seccomp") {
+        ctx.logger.warn(
+          "sandbox.clone_fallback_probe skipped (kernel sandbox not active)",
+          { mode: decision.mode }
+        );
+      } else {
+        const probe = await runCloneFallbackProbe(decision);
+        if (!probe.ok) {
+          ctx.logger.error(
+            "sandbox.clone_fallback_probe FAILED \u2014 refusing to register tools",
+            {
+              step: probe.step,
+              message: probe.message,
+              observed: probe.observed
+            }
+          );
+          process.exit(1);
+        }
+        ctx.logger.info("sandbox.clone_fallback_probe ok", {
+          glibc: probe.glibc,
+          python: probe.python,
+          arch: probe.arch,
+          clone3Errno: probe.clone3Errno,
+          clone3ErrnoName: probe.clone3ErrnoName,
+          clone2ExitSignal: probe.clone2ExitSignal
+        });
+      }
+    }
     ctx.tools.register(
       "cad:run_script",
       {
