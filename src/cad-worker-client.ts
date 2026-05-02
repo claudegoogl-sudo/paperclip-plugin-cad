@@ -398,7 +398,6 @@ export function buildSpawnInvocation(opts: BuildSpawnOpts): SpawnInvocation {
 
   const args: string[] = [
     "--unshare-all",
-    "--share-net=false",
     "--die-with-parent",
     "--new-session",
     "--clearenv",
