@@ -42,12 +42,20 @@ jobs:
           node-version: '20'
           cache: npm
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install Python worker deps
-        run: pip install -r worker/requirements-cad.txt
+      # Install cadquery into the SYSTEM python (/usr/bin/python3). The bwrap
+      # sandbox argv only mounts `/usr` (and `/lib`, `/lib64`, `/bin`,
+      # `/etc/ld.so.cache`) — the actions/setup-python hostedtoolcache path
+      # at /opt/hostedtoolcache/Python/... is NOT visible inside the
+      # sandbox, so any cadquery installed via the GitHub-managed python
+      # would be invisible to the worker. We therefore install with the
+      # system interpreter and `--break-system-packages` (required by
+      # PEP 668 on Ubuntu 24.04, which is acceptable for a single-purpose
+      # CI runner).
+      - name: Install Python worker deps (into /usr/bin/python3 site-packages)
+        run: |
+          /usr/bin/python3 --version
+          sudo /usr/bin/python3 -m pip install --break-system-packages -r worker/requirements-cad.txt
+          /usr/bin/python3 -c "import cadquery; print('host cadquery=', cadquery.__version__)"
 
       - name: npm install
         run: npm ci
@@ -94,6 +102,94 @@ jobs:
             clone-evidence-ci.txt
             worker/seccomp_filter.bpf.sha256
           if-no-files-found: error
+
+      - name: Sandbox smoke — verify bwrap+seccomp can spawn python
+        # Diagnostic gate: runs bwrap with the EXACT argv the production
+        # spawn path uses (mirrors buildSpawnInvocation in
+        # src/cad-worker-client.ts) and feeds it a no-op python program.
+        # If this step fails, the bwrap test matrix below cannot succeed
+        # either, and the stderr captured here is the load-bearing
+        # diagnostic for the failure (the test envelope only surfaces
+        # "Worker produced no output on stdout. stderr: ..." which is
+        # invisible to a vanilla `toBe(true)` assertion). Keeps the CI
+        # cycle short by failing here instead of after a 30-test rerun.
+        shell: bash
+        run: |
+          set -uo pipefail
+          install -d /tmp/cad-bwrap-smoke
+          # Pre-flight: dump the host-side toolchain (which python, where pip
+          # installed cadquery). The bwrap world only sees /usr/bin:/bin via
+          # PATH, so if `pip install` landed cadquery in hostedtoolcache it is
+          # invisible inside the sandbox. This printout makes that mismatch
+          # impossible to miss.
+          echo "host: which bwrap = $(command -v bwrap || echo MISSING)"
+          bwrap --version || true
+          echo "host: which python3 (PATH lookup) = $(command -v python3 || echo MISSING)"
+          /usr/bin/python3 --version || true
+          /usr/bin/python3 -c "import cadquery, sys; print('host /usr/bin/python3 cadquery=', cadquery.__version__)" 2>&1 || \
+            echo "host /usr/bin/python3: cadquery NOT importable"
+          cat > /tmp/cad-bwrap-smoke/probe.py <<'PY'
+          import sys
+          print("bwrap-smoke: python=", sys.version.split()[0], "exe=", sys.executable)
+          try:
+              import cadquery
+              print("bwrap-smoke: cadquery=", cadquery.__version__)
+          except Exception as e:  # noqa: BLE001
+              print("bwrap-smoke: cadquery import FAILED:", repr(e))
+              sys.exit(2)
+          sys.exit(0)
+          PY
+          # Mirror the rlimits from defaultRlimits() in cad-worker-client.ts
+          # (asBytes=2GiB, nproc=64, nofile=256, fsize=256MiB, cpu=t+5,
+          # core=0). Mismatched values would confuse the diagnostic.
+          RLIMIT_AS=2147483648
+          RLIMIT_NPROC=64
+          RLIMIT_NOFILE=256
+          RLIMIT_FSIZE=268435456
+          RLIMIT_CPU=35
+          RLIMIT_CORE=0
+          set +e
+          exec 3<worker/seccomp_filter.bpf
+          bwrap \
+            --unshare-all \
+            --share-net=false \
+            --die-with-parent \
+            --new-session \
+            --clearenv \
+            --setenv PATH /usr/bin:/bin \
+            --setenv HOME /tmp \
+            --setenv LANG C.UTF-8 \
+            --setenv PYTHONDONTWRITEBYTECODE 1 \
+            --setenv PYTHONHASHSEED random \
+            --setenv PYTHONUNBUFFERED 1 \
+            --uid 65534 --gid 65534 \
+            --hostname cad-worker \
+            --proc /proc \
+            --dev /dev \
+            --ro-bind /usr /usr \
+            --ro-bind /lib /lib \
+            --ro-bind /lib64 /lib64 \
+            --ro-bind /bin /bin \
+            --ro-bind /etc/ld.so.cache /etc/ld.so.cache \
+            --tmpfs /tmp \
+            --bind /tmp/cad-bwrap-smoke /tmp/cad-bwrap-smoke \
+            --chdir /tmp/cad-bwrap-smoke \
+            --cap-drop ALL \
+            --seccomp 3 \
+            --rlimit-as "$RLIMIT_AS" \
+            --rlimit-nproc "$RLIMIT_NPROC" \
+            --rlimit-nofile "$RLIMIT_NOFILE" \
+            --rlimit-fsize "$RLIMIT_FSIZE" \
+            --rlimit-cpu "$RLIMIT_CPU" \
+            --rlimit-core "$RLIMIT_CORE" \
+            -- python3 /tmp/cad-bwrap-smoke/probe.py
+          rc=$?
+          exec 3<&-
+          echo "bwrap-smoke exit=$rc"
+          if [[ $rc -ne 0 ]]; then
+            echo "::error::bwrap+seccomp smoke spawn failed with exit $rc — see stderr above. The bwrap test matrix cannot pass while this is failing."
+            exit $rc
+          fi
 
       - name: Build TypeScript bundles
         run: npm run build

@@ -86,6 +86,7 @@ step1() {
   cat >"$TMPDIR/clone3_probe.c" <<'C'
 #define _GNU_SOURCE
 #include <errno.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
