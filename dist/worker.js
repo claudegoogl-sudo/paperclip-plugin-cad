@@ -5,11 +5,16 @@ import * as path from "node:path";
 // src/cad-worker-client.ts
 import { spawn } from "node:child_process";
 import { mkdtemp } from "node:fs/promises";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { tmpdir as tmpdir2 } from "node:os";
 import { join as join2, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
+import { createHash } from "node:crypto";
+
+// src/manifest.ts
+var SECCOMP_FILTER_SHA256_PIN = "6bdbbc4fdfb3d80996c66a812df450c95043a86364fe8955651ec867859617ba";
+var SECCOMP_LOADER_SHA256_PIN = "0fc1b58d38895fb2dc7be1464b1230344530aa7f168af9478fa47153e20f8be0";
 
 // src/stub-cad-worker.ts
 import { tmpdir } from "node:os";
@@ -106,7 +111,7 @@ function selectSpawnMode(env = process.env, platform = process.platform) {
       `bwrap ${v?.major}.${v?.minor} predates --rlimit-* (need 0.6+). Build the preexec wrapper with \`make -C worker cad_preexec\`, or upgrade bubblewrap on the deploy host.`
     );
   }
-  return {
+  const decision = {
     mode: "bwrap+seccomp",
     bwrapPath,
     bwrapVersion: v ?? void 0,
@@ -115,6 +120,69 @@ function selectSpawnMode(env = process.env, platform = process.platform) {
     seccompLoaderPath: SECCOMP_LOADER_PATH,
     preexecPath: native ? void 0 : PREEXEC_PATH
   };
+  verifySeccompPins(decision);
+  return decision;
+}
+var SHA256_HEX_LEN = 64;
+var SHA256_HEX_RE = /^[0-9a-f]{64}$/i;
+function readSidecarSha(name) {
+  const sidecarPath = join2(__dirname, "..", "dist", `${name}.sha256`);
+  if (!existsSync(sidecarPath)) return void 0;
+  const raw = readFileSync(sidecarPath, "utf8").trim();
+  return SHA256_HEX_RE.test(raw) ? raw.toLowerCase() : void 0;
+}
+function resolveDefaultPins() {
+  const filterConst = SECCOMP_FILTER_SHA256_PIN.length === SHA256_HEX_LEN ? SECCOMP_FILTER_SHA256_PIN : void 0;
+  const loaderConst = SECCOMP_LOADER_SHA256_PIN.length === SHA256_HEX_LEN ? SECCOMP_LOADER_SHA256_PIN : void 0;
+  return {
+    filterSha256: filterConst ?? readSidecarSha("seccomp_filter.bpf") ?? SECCOMP_FILTER_SHA256_PIN,
+    loaderSha256: loaderConst ?? readSidecarSha("seccomp_load.py") ?? SECCOMP_LOADER_SHA256_PIN
+  };
+}
+function verifySeccompPins(decision, pins = resolveDefaultPins()) {
+  if (decision.mode !== "bwrap+seccomp") return;
+  const checks = [
+    {
+      name: "seccomp_filter.bpf",
+      pin: pins.filterSha256,
+      path: decision.seccompFilterPath ?? ""
+    },
+    {
+      name: "seccomp_load.py",
+      pin: pins.loaderSha256,
+      path: decision.seccompLoaderPath ?? ""
+    }
+  ];
+  for (const c of checks) {
+    if (c.pin.length !== SHA256_HEX_LEN) {
+      throw new CadWorkerInternalError(
+        `[PLA-114 \xA75.2] ${c.name}: build manifest unsubstituted \u2014 pin length ${c.pin.length} \u2260 ${SHA256_HEX_LEN} (placeholder __PLA114_SECCOMP_*_SHA256__ still present?). Run \`npm run build\` so esbuild substitutes the digests.`
+      );
+    }
+    if (!SHA256_HEX_RE.test(c.pin)) {
+      throw new CadWorkerInternalError(
+        `[PLA-114 \xA75.2] ${c.name}: build manifest pin is not a sha256 hex string: ${c.pin}`
+      );
+    }
+    if (!c.path) {
+      throw new CadWorkerInternalError(
+        `[PLA-114 \xA75.2] ${c.name}: SpawnModeDecision is missing the path field \u2014 cannot verify pin.`
+      );
+    }
+    let actual;
+    try {
+      actual = createHash("sha256").update(readFileSync(c.path)).digest("hex");
+    } catch (err) {
+      throw new CadWorkerInternalError(
+        `[PLA-114 \xA75.2] ${c.name}: failed to read for sha256 verification (path=${c.path}): ${err.message}`
+      );
+    }
+    if (actual.toLowerCase() !== c.pin.toLowerCase()) {
+      throw new CadWorkerInternalError(
+        `[PLA-114 \xA75.2] ${c.name}: sha256 mismatch \u2014 manifest pin=${c.pin} actual=${actual} path=${c.path}. Refusing to launch worker; the kernel sandbox layer would be silently inert under this state (substitution-attack defense).`
+      );
+    }
+  }
 }
 var PYTHON_BOOTSTRAP = "import sys; sys.path.insert(0, '/sandbox'); from seccomp_load import lock_down; lock_down('/sandbox/seccomp_filter.bpf'); import cad_worker; cad_worker.main()";
 function buildSpawnInvocation(opts) {

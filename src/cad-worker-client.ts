@@ -50,11 +50,17 @@
 
 import { spawn, type StdioOptions } from "node:child_process";
 import { mkdtemp } from "node:fs/promises";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
+import { createHash } from "node:crypto";
+
+import {
+  SECCOMP_FILTER_SHA256_PIN,
+  SECCOMP_LOADER_SHA256_PIN,
+} from "./manifest.js";
 
 // Re-export shared types and error classes from the stub so callers import from
 // one place regardless of which implementation is active.
@@ -309,7 +315,7 @@ export function selectSpawnMode(
     );
   }
 
-  return {
+  const decision: SpawnModeDecision = {
     mode: "bwrap+seccomp",
     bwrapPath,
     bwrapVersion: v ?? undefined,
@@ -318,6 +324,167 @@ export function selectSpawnMode(
     seccompLoaderPath: SECCOMP_LOADER_PATH,
     preexecPath: native ? undefined : PREEXEC_PATH,
   };
+
+  // PLA-215 / PLA-114 §5.2: hard-fail on sha256 mismatch between the build
+  // manifest pin and the bytes on disk. Closes the substitution-attack
+  // window where a tampered loader (e.g., one that omits the
+  // prctl(PR_SET_SECCOMP) call) silently disables the kernel filter while
+  // leaving bwrap/cap-drop/netns intact. Verification is wedged in here so
+  // every consumer of selectSpawnMode (createCadWorker, renderCadQuery's
+  // default-arg path, invokeWorker's default-arg path) is gated.
+  verifySeccompPins(decision);
+  return decision;
+}
+
+// ---------------------------------------------------------------------------
+// PLA-215 / PLA-114 §5.2 — runtime sha256 verification of the seccomp blob
+// and python loader shim.
+// ---------------------------------------------------------------------------
+
+/**
+ * Pinned digests for the security-critical bootstrap files. Default values
+ * come from `src/manifest.ts`, which esbuild substitutes at build time
+ * (see `esbuild.config.mjs`). Tests override `pins` to drive specific
+ * mismatch / unsubstituted-placeholder failure modes.
+ */
+export interface SeccompPins {
+  filterSha256: string;
+  loaderSha256: string;
+}
+
+/** Sha256 hex string is 64 lowercase hex chars. */
+const SHA256_HEX_LEN = 64;
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/i;
+
+/**
+ * PLA-215 sidecar fallback. esbuild's post-bundle pass writes
+ * `dist/seccomp_filter.bpf.sha256` and `dist/seccomp_load.py.sha256`
+ * alongside the substitution it does into the bundled JS sources.
+ * Production builds load from `dist/cad-worker-client.js` and read the
+ * already-substituted constant; the sidecar path is the same file. Tests
+ * and `npm run dev` load from `src/cad-worker-client.ts` where the
+ * imported constant is still the literal `__PLA114_SECCOMP_*_SHA256__`
+ * placeholder (esbuild substitutes only the dist outputs). In that case
+ * the sidecar — produced by the same build that would have substituted
+ * the constant — provides the real digest. The path resolves to the
+ * repo's `dist/` from both src/ and dist/ load locations.
+ */
+function readSidecarSha(name: string): string | undefined {
+  const sidecarPath = join(__dirname, "..", "dist", `${name}.sha256`);
+  if (!existsSync(sidecarPath)) return undefined;
+  const raw = readFileSync(sidecarPath, "utf8").trim();
+  return SHA256_HEX_RE.test(raw) ? raw.toLowerCase() : undefined;
+}
+
+/**
+ * Default pin resolution for `verifySeccompPins`. Priority:
+ *   1. Manifest constant if esbuild substituted it (length === 64).
+ *   2. Sidecar `dist/<name>.sha256` (also a build-frozen artifact).
+ *   3. Original (unsubstituted) constant — caller's verifier will then
+ *      hard-fail on the length check, surfacing the "build manifest
+ *      unsubstituted" error.
+ *
+ * Both fallback sources are produced by the SAME esbuild post-pass, so the
+ * substitution-attack threat model is preserved (build-time freeze, not
+ * runtime recomputation from the file being verified).
+ */
+function resolveDefaultPins(): SeccompPins {
+  const filterConst =
+    SECCOMP_FILTER_SHA256_PIN.length === SHA256_HEX_LEN
+      ? SECCOMP_FILTER_SHA256_PIN
+      : undefined;
+  const loaderConst =
+    SECCOMP_LOADER_SHA256_PIN.length === SHA256_HEX_LEN
+      ? SECCOMP_LOADER_SHA256_PIN
+      : undefined;
+  return {
+    filterSha256:
+      filterConst ??
+      readSidecarSha("seccomp_filter.bpf") ??
+      SECCOMP_FILTER_SHA256_PIN,
+    loaderSha256:
+      loaderConst ??
+      readSidecarSha("seccomp_load.py") ??
+      SECCOMP_LOADER_SHA256_PIN,
+  };
+}
+
+/**
+ * Verify both `seccomp_filter.bpf` and `seccomp_load.py` against the
+ * build-manifest sha256 pins. No-op for `dev_direct` mode (the kernel
+ * layer is already explicitly opted out via CAD_WORKER_UNSAFE_DEV).
+ *
+ * Throws `CadWorkerInternalError` on:
+ *   - either pin failing the 64-hex-char length/charset check (catches
+ *     the unsubstituted `__PLA114_SECCOMP_*_SHA256__` placeholder, which
+ *     is 32 chars — so a build that didn't run the esbuild substitution
+ *     fails closed at the first launch).
+ *   - the file at `seccompFilterPath` or `seccompLoaderPath` not matching
+ *     its pinned digest (substitution-attack detection).
+ *   - either path being unreadable.
+ *
+ * The check is cheap (sha256 of two small files, ~100 KiB total) and
+ * idempotent — safe to call once per worker-client construction or once
+ * per `selectSpawnMode()` call.
+ */
+export function verifySeccompPins(
+  decision: SpawnModeDecision,
+  pins: SeccompPins = resolveDefaultPins(),
+): void {
+  if (decision.mode !== "bwrap+seccomp") return;
+
+  const checks: Array<{ name: string; pin: string; path: string }> = [
+    {
+      name: "seccomp_filter.bpf",
+      pin: pins.filterSha256,
+      path: decision.seccompFilterPath ?? "",
+    },
+    {
+      name: "seccomp_load.py",
+      pin: pins.loaderSha256,
+      path: decision.seccompLoaderPath ?? "",
+    },
+  ];
+
+  for (const c of checks) {
+    if (c.pin.length !== SHA256_HEX_LEN) {
+      throw new CadWorkerInternalError(
+        `[PLA-114 §5.2] ${c.name}: build manifest unsubstituted — ` +
+          `pin length ${c.pin.length} ≠ ${SHA256_HEX_LEN} ` +
+          `(placeholder __PLA114_SECCOMP_*_SHA256__ still present?). ` +
+          `Run \`npm run build\` so esbuild substitutes the digests.`,
+      );
+    }
+    if (!SHA256_HEX_RE.test(c.pin)) {
+      throw new CadWorkerInternalError(
+        `[PLA-114 §5.2] ${c.name}: build manifest pin is not a sha256 hex string: ${c.pin}`,
+      );
+    }
+    if (!c.path) {
+      throw new CadWorkerInternalError(
+        `[PLA-114 §5.2] ${c.name}: SpawnModeDecision is missing the path field — cannot verify pin.`,
+      );
+    }
+
+    let actual: string;
+    try {
+      actual = createHash("sha256").update(readFileSync(c.path)).digest("hex");
+    } catch (err) {
+      throw new CadWorkerInternalError(
+        `[PLA-114 §5.2] ${c.name}: failed to read for sha256 verification ` +
+          `(path=${c.path}): ${(err as Error).message}`,
+      );
+    }
+
+    if (actual.toLowerCase() !== c.pin.toLowerCase()) {
+      throw new CadWorkerInternalError(
+        `[PLA-114 §5.2] ${c.name}: sha256 mismatch — ` +
+          `manifest pin=${c.pin} actual=${actual} path=${c.path}. ` +
+          `Refusing to launch worker; the kernel sandbox layer would be ` +
+          `silently inert under this state (substitution-attack defense).`,
+      );
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -693,10 +860,30 @@ interface ArtifactEntry { script: string }
  * Spawn-mode decision is resolved ONCE here and cached for the lifetime of
  * the returned client (PLA-106 §5.3). The `INFO sandbox.mode = …` line is
  * emitted on construction; never repeated per request.
+ *
+ * @param decisionOverride  Test seam: bypass `selectSpawnMode()` (which
+ *   requires Linux + bwrap on PATH) and inject a fabricated decision.
+ *   Production code never passes this. PLA-215 regression tests use it
+ *   to verify that runtime sha256 verification fail-closes on tampered
+ *   loader/filter paths and on unsubstituted-placeholder pins.
  */
-export function createCadWorker(logger: SandboxLogger = consoleLogger): CadWorker {
-  const decision = selectSpawnMode();
+export function createCadWorker(
+  logger: SandboxLogger = consoleLogger,
+  decisionOverride?: SpawnModeDecision,
+  pinsOverride?: SeccompPins,
+): CadWorker {
+  const decision = decisionOverride ?? selectSpawnMode();
   logSpawnModeOnce(decision, logger);
+
+  // PLA-215 / PLA-114 §5.2: if the caller injected a decision (test seam),
+  // selectSpawnMode's verification was bypassed — re-run it here so the
+  // override path is held to the same fail-closed bar as production. The
+  // unsubstituted-placeholder regression test additionally injects a
+  // tampered `pinsOverride` to drive the length-check error path
+  // independent of whether the build ran the esbuild substitution.
+  if (decisionOverride !== undefined || pinsOverride !== undefined) {
+    verifySeccompPins(decision, pinsOverride);
+  }
 
   const registry = new Map<string, ArtifactEntry>();
 
