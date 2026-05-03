@@ -94,27 +94,25 @@ async function build() {
     // pins are required by rev-4 §5.2 — the loader pin closes the
     // substitution-attack window where the prctl-issuing python shim is
     // swapped for a no-op while the filter blob digest stays unchanged.
-    const manifestJsPath = "dist/manifest.js";
-    let manifestSrc = readFileSync(manifestJsPath, "utf8");
-
+    //
+    // PLA-215: the same placeholders also appear in the bundled
+    // `dist/worker.js` (cad-worker-client.ts imports them from manifest.ts
+    // for runtime verification — esbuild inlines manifest.ts into both
+    // bundle outputs because they're separate entrypoints). We substitute
+    // BOTH files so the runtime verifier in worker.js sees real digests
+    // instead of placeholders. An unsubstituted placeholder failing the
+    // sha256 length check at startup is the intended fail-closed signal.
+    const targets = ["dist/manifest.js", "dist/worker.js"];
     const filterSha = computeSeccompFilterSha256();
+    const loaderSha = computeSeccompLoaderSha256();
+
     if (filterSha) {
-      manifestSrc = manifestSrc.replace(
-        /__PLA114_SECCOMP_FILTER_SHA256__/g,
-        filterSha,
-      );
       writeFileSync("dist/seccomp_filter.bpf.sha256", `${filterSha}\n`);
       console.log(
         `[build] manifest pinned to seccomp_filter.bpf sha256=${filterSha}`,
       );
     }
-
-    const loaderSha = computeSeccompLoaderSha256();
     if (loaderSha) {
-      manifestSrc = manifestSrc.replace(
-        /__PLA114_SECCOMP_LOADER_SHA256__/g,
-        loaderSha,
-      );
       writeFileSync("dist/seccomp_load.py.sha256", `${loaderSha}\n`);
       console.log(
         `[build] manifest pinned to seccomp_load.py sha256=${loaderSha}`,
@@ -122,7 +120,17 @@ async function build() {
     }
 
     if (filterSha || loaderSha) {
-      writeFileSync(manifestJsPath, manifestSrc);
+      for (const target of targets) {
+        if (!existsSync(target)) continue;
+        let src = readFileSync(target, "utf8");
+        if (filterSha) {
+          src = src.replace(/__PLA114_SECCOMP_FILTER_SHA256__/g, filterSha);
+        }
+        if (loaderSha) {
+          src = src.replace(/__PLA114_SECCOMP_LOADER_SHA256__/g, loaderSha);
+        }
+        writeFileSync(target, src);
+      }
     }
 
     console.log("Build complete.");
