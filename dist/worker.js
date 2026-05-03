@@ -5,11 +5,16 @@ import * as path from "node:path";
 // src/cad-worker-client.ts
 import { spawn } from "node:child_process";
 import { mkdtemp } from "node:fs/promises";
-import { existsSync, openSync, closeSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { tmpdir as tmpdir2 } from "node:os";
 import { join as join2, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
+import { createHash } from "node:crypto";
+
+// src/manifest.ts
+var SECCOMP_FILTER_SHA256_PIN = "6bdbbc4fdfb3d80996c66a812df450c95043a86364fe8955651ec867859617ba";
+var SECCOMP_LOADER_SHA256_PIN = "0fc1b58d38895fb2dc7be1464b1230344530aa7f168af9478fa47153e20f8be0";
 
 // src/stub-cad-worker.ts
 import { tmpdir } from "node:os";
@@ -32,6 +37,11 @@ var __filename = fileURLToPath(import.meta.url);
 var __dirname = dirname(__filename);
 var WORKER_PY = join2(__dirname, "cad_worker.py");
 var SECCOMP_FILTER_PATH = join2(__dirname, "..", "worker", "seccomp_filter.bpf");
+var SECCOMP_LOADER_PATH = join2(__dirname, "..", "worker", "seccomp_load.py");
+var SANDBOX_ROOT = "/sandbox";
+var SANDBOX_FILTER_PATH = `${SANDBOX_ROOT}/seccomp_filter.bpf`;
+var SANDBOX_LOADER_PATH = `${SANDBOX_ROOT}/seccomp_load.py`;
+var SANDBOX_WORKER_PATH = `${SANDBOX_ROOT}/cad_worker.py`;
 var PREEXEC_PATH = join2(__dirname, "..", "worker", "cad_preexec");
 function defaultRlimits(timeoutSeconds) {
   return {
@@ -89,22 +99,92 @@ function selectSpawnMode(env = process.env, platform = process.platform) {
       `Option B sandbox unavailable: seccomp filter blob not found at ${SECCOMP_FILTER_PATH}. Build it with \`make -C worker seccomp_filter.bpf\` (requires libseccomp-dev).`
     );
   }
+  if (!existsSync(SECCOMP_LOADER_PATH)) {
+    throw new CadWorkerInternalError(
+      `Option B sandbox unavailable: python seccomp loader not found at ${SECCOMP_LOADER_PATH}. This file ships in worker/ alongside the filter source.`
+    );
+  }
   const v = bwrapVersionOf(bwrapPath);
-  const native = v != null && (v.major > 0 || v.major === 0 && v.minor >= 6);
+  const native = false;
   if (!native && !existsSync(PREEXEC_PATH)) {
     throw new CadWorkerInternalError(
       `bwrap ${v?.major}.${v?.minor} predates --rlimit-* (need 0.6+). Build the preexec wrapper with \`make -C worker cad_preexec\`, or upgrade bubblewrap on the deploy host.`
     );
   }
-  return {
+  const decision = {
     mode: "bwrap+seccomp",
     bwrapPath,
     bwrapVersion: v ?? void 0,
     bwrapHasNativeRlimits: native,
     seccompFilterPath: SECCOMP_FILTER_PATH,
+    seccompLoaderPath: SECCOMP_LOADER_PATH,
     preexecPath: native ? void 0 : PREEXEC_PATH
   };
+  verifySeccompPins(decision);
+  return decision;
 }
+var SHA256_HEX_LEN = 64;
+var SHA256_HEX_RE = /^[0-9a-f]{64}$/i;
+function readSidecarSha(name) {
+  const sidecarPath = join2(__dirname, "..", "dist", `${name}.sha256`);
+  if (!existsSync(sidecarPath)) return void 0;
+  const raw = readFileSync(sidecarPath, "utf8").trim();
+  return SHA256_HEX_RE.test(raw) ? raw.toLowerCase() : void 0;
+}
+function resolveDefaultPins() {
+  const filterConst = SECCOMP_FILTER_SHA256_PIN.length === SHA256_HEX_LEN ? SECCOMP_FILTER_SHA256_PIN : void 0;
+  const loaderConst = SECCOMP_LOADER_SHA256_PIN.length === SHA256_HEX_LEN ? SECCOMP_LOADER_SHA256_PIN : void 0;
+  return {
+    filterSha256: filterConst ?? readSidecarSha("seccomp_filter.bpf") ?? SECCOMP_FILTER_SHA256_PIN,
+    loaderSha256: loaderConst ?? readSidecarSha("seccomp_load.py") ?? SECCOMP_LOADER_SHA256_PIN
+  };
+}
+function verifySeccompPins(decision, pins = resolveDefaultPins()) {
+  if (decision.mode !== "bwrap+seccomp") return;
+  const checks = [
+    {
+      name: "seccomp_filter.bpf",
+      pin: pins.filterSha256,
+      path: decision.seccompFilterPath ?? ""
+    },
+    {
+      name: "seccomp_load.py",
+      pin: pins.loaderSha256,
+      path: decision.seccompLoaderPath ?? ""
+    }
+  ];
+  for (const c of checks) {
+    if (c.pin.length !== SHA256_HEX_LEN) {
+      throw new CadWorkerInternalError(
+        `[PLA-114 \xA75.2] ${c.name}: build manifest unsubstituted \u2014 pin length ${c.pin.length} \u2260 ${SHA256_HEX_LEN} (placeholder __PLA114_SECCOMP_*_SHA256__ still present?). Run \`npm run build\` so esbuild substitutes the digests.`
+      );
+    }
+    if (!SHA256_HEX_RE.test(c.pin)) {
+      throw new CadWorkerInternalError(
+        `[PLA-114 \xA75.2] ${c.name}: build manifest pin is not a sha256 hex string: ${c.pin}`
+      );
+    }
+    if (!c.path) {
+      throw new CadWorkerInternalError(
+        `[PLA-114 \xA75.2] ${c.name}: SpawnModeDecision is missing the path field \u2014 cannot verify pin.`
+      );
+    }
+    let actual;
+    try {
+      actual = createHash("sha256").update(readFileSync(c.path)).digest("hex");
+    } catch (err) {
+      throw new CadWorkerInternalError(
+        `[PLA-114 \xA75.2] ${c.name}: failed to read for sha256 verification (path=${c.path}): ${err.message}`
+      );
+    }
+    if (actual.toLowerCase() !== c.pin.toLowerCase()) {
+      throw new CadWorkerInternalError(
+        `[PLA-114 \xA75.2] ${c.name}: sha256 mismatch \u2014 manifest pin=${c.pin} actual=${actual} path=${c.path}. Refusing to launch worker; the kernel sandbox layer would be silently inert under this state (substitution-attack defense).`
+      );
+    }
+  }
+}
+var PYTHON_BOOTSTRAP = "import sys; sys.path.insert(0, '/sandbox'); from seccomp_load import lock_down; lock_down('/sandbox/seccomp_filter.bpf'); import cad_worker; cad_worker.main()";
 function buildSpawnInvocation(opts) {
   const pythonBin = opts.pythonBin ?? "python3";
   const env = {
@@ -120,16 +200,12 @@ function buildSpawnInvocation(opts) {
       stdio: ["pipe", "pipe", "pipe"]
     };
   }
-  if (opts.seccompFd === void 0) {
-    throw new CadWorkerInternalError(
-      "buildSpawnInvocation(bwrap+seccomp): seccompFd is required"
-    );
-  }
   const bwrap = opts.decision.bwrapPath;
   const venvPython = pythonBin;
+  const filterBlob = opts.decision.seccompFilterPath;
+  const loaderShim = opts.decision.seccompLoaderPath;
   const args = [
     "--unshare-all",
-    "--share-net=false",
     "--die-with-parent",
     "--new-session",
     "--clearenv",
@@ -176,9 +252,17 @@ function buildSpawnInvocation(opts) {
     "--ro-bind",
     "/etc/ld.so.cache",
     "/etc/ld.so.cache",
+    // Trusted bootstrap files mounted under /sandbox. The loader shim and
+    // filter blob are both content-pinned by the build manifest (§5.2).
+    "--ro-bind",
+    filterBlob,
+    SANDBOX_FILTER_PATH,
+    "--ro-bind",
+    loaderShim,
+    SANDBOX_LOADER_PATH,
     "--ro-bind",
     WORKER_PY,
-    WORKER_PY,
+    SANDBOX_WORKER_PATH,
     "--tmpfs",
     "/tmp",
     "--bind",
@@ -187,10 +271,7 @@ function buildSpawnInvocation(opts) {
     "--chdir",
     opts.workdir,
     "--cap-drop",
-    "ALL",
-    // Filter FD: the parent-side FD lives at child FD 3 (first `stdio` extra).
-    "--seccomp",
-    "3"
+    "ALL"
   ];
   if (opts.decision.bwrapHasNativeRlimits) {
     args.push(
@@ -207,7 +288,7 @@ function buildSpawnInvocation(opts) {
       "--rlimit-core",
       String(opts.rlimits.coreBytes)
     );
-    args.push("--", venvPython, WORKER_PY);
+    args.push("--", venvPython, "-c", PYTHON_BOOTSTRAP);
   } else {
     const preexec = opts.decision.preexecPath;
     args.push("--ro-bind", preexec, preexec);
@@ -217,14 +298,9 @@ function buildSpawnInvocation(opts) {
     args.push("--setenv", "CAD_PREEXEC_RLIMIT_FSIZE", String(opts.rlimits.fsizeBytes));
     args.push("--setenv", "CAD_PREEXEC_RLIMIT_CPU", String(opts.rlimits.cpuSeconds));
     args.push("--setenv", "CAD_PREEXEC_RLIMIT_CORE", String(opts.rlimits.coreBytes));
-    args.push("--", preexec, venvPython, WORKER_PY);
+    args.push("--", preexec, venvPython, "-c", PYTHON_BOOTSTRAP);
   }
-  const stdio = [
-    "pipe",
-    "pipe",
-    "pipe",
-    { type: "fd", fd: opts.seccompFd }
-  ];
+  const stdio = ["pipe", "pipe", "pipe"];
   return {
     command: bwrap,
     args,
@@ -234,34 +310,17 @@ function buildSpawnInvocation(opts) {
 }
 async function invokeWorker(job, timeoutSeconds, decision = selectSpawnMode(), pythonBin = "python3") {
   const rlimits = defaultRlimits(timeoutSeconds);
-  let seccompFd;
-  if (decision.mode === "bwrap+seccomp") {
-    seccompFd = openSync(decision.seccompFilterPath, "r");
-  }
-  let invocation;
-  try {
-    invocation = buildSpawnInvocation({
-      decision,
-      workdir: job.workdir,
-      pythonBin,
-      seccompFd,
-      rlimits
-    });
-  } catch (err) {
-    if (seccompFd !== void 0) closeSync(seccompFd);
-    throw err;
-  }
+  const invocation = buildSpawnInvocation({
+    decision,
+    workdir: job.workdir,
+    pythonBin,
+    rlimits
+  });
   return new Promise((resolve) => {
     const child = spawn(invocation.command, invocation.args, {
       stdio: invocation.stdio,
       env: invocation.env
     });
-    if (seccompFd !== void 0) {
-      try {
-        closeSync(seccompFd);
-      } catch {
-      }
-    }
     let stdout = "";
     let stderr = "";
     let settled = false;

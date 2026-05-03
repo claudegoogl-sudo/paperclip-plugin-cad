@@ -19,12 +19,15 @@
  * failure there.
  */
 
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, afterEach } from "vitest";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { mkdtemp, access } from "node:fs/promises";
 import { constants, existsSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 import {
   invokeWorker,
@@ -78,19 +81,49 @@ beforeAll(() => {
   expect(DECISION.mode).toBe("bwrap+seccomp");
 });
 
+// Tracks the most recent worker result so that afterEach can dump it on
+// assertion failure. Without this, a failing `expect(...).toBe(true)` only
+// shows "expected false to be true" with no insight into what bwrap/python
+// actually returned — making CI triage on remote runners impossible.
+let LAST_RESULT: WorkerResult | null = null;
+
 async function run(script: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<WorkerResult> {
   const workdir = await freshWorkdir();
-  return invokeWorker({ script, format: "step", workdir }, timeoutSeconds, DECISION);
+  const r = await invokeWorker({ script, format: "step", workdir }, timeoutSeconds, DECISION);
+  LAST_RESULT = r;
+  return r;
 }
+
+afterEach((ctx) => {
+  if (ctx.task.result?.state === "fail" && LAST_RESULT !== null) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[bwrap-test diag] ${ctx.task.name} failed; last worker result:\n` +
+        JSON.stringify(LAST_RESULT, null, 2),
+    );
+  }
+  LAST_RESULT = null;
+});
 
 /**
  * Spec §4 kernel-level discriminator predicate. Returns true if the result
  * indicates a kernel kill (SIGSYS, or SIGKILL with seccomp audit text).
+ *
+ * bwrap propagates child signal exits as `exit(128 + signum)` (POSIX shell
+ * convention), so a SIGSYS-killed worker is observed by Node's
+ * `child_process` as `exitCode=159` (=128+SIGSYS) with `exitSignal=null`.
+ * Treat that shape as a kernel kill too — the §4 contract is "killed by the
+ * kernel because of seccomp", not "Node saw it via signal vs code".
  */
+const _SIGSYS_NUM = 31;
+const _SIGKILL_NUM = 9;
 function isKernelKill(r: WorkerResult): boolean {
   if (r.ok) return false;
   if (r.exitSignal === "SIGSYS") return true;
   if (r.exitSignal === "SIGKILL" && /seccomp/i.test(r.message)) return true;
+  // bwrap-propagated signal-as-exit-code (PLA-114 rev-5 R8b triage).
+  if (r.exitCode === 128 + _SIGSYS_NUM) return true;
+  if (r.exitCode === 128 + _SIGKILL_NUM && /seccomp/i.test(r.message)) return true;
   return r.error === "sandbox_violation";
 }
 
@@ -116,9 +149,19 @@ describe.skipIf(!HAS_BWRAP)("PLA-114 §4 — bwrap+seccomp integration matrix", 
         "socket.create_connection(('1.1.1.1', 80))",
         "result = None",
       ].join("\n"));
+      // Three valid denials per §7 layer-responsibility split:
+      //   (a) kernel SIGSYS on the socket(2) syscall, or
+      //   (b) netns errno (EAFNOSUPPORT/ENETUNREACH) if `import socket`
+      //       slips through but the connect fails on a fresh netns, or
+      //   (c) in-process ImportError from `_restricted_import` —
+      //       `socket` is in `_BLOCKED_MODULES` (cad_worker.py:144 group),
+      //       so user-script `import socket` raises before any syscall.
+      // (c) matches the R3/R4/R7 pattern (in-process catch is friendly UX);
+      // R2 (ctypes path) is the kernel-layer canary for the socket vector.
       expect(
         isKernelKill(r) ||
-          envelopeMatches(r, /EAFNOSUPPORT|ENETUNREACH|Network is unreachable/i),
+          envelopeMatches(r, /EAFNOSUPPORT|ENETUNREACH|Network is unreachable/i) ||
+          envelopeMatches(r, /Import blocked: 'socket'|ImportError/i),
       ).toBe(true);
     }, T);
 
@@ -188,19 +231,34 @@ describe.skipIf(!HAS_BWRAP)("PLA-114 §4 — bwrap+seccomp integration matrix", 
     }, T);
 
     it("R8a: sys.modules['__main__']._REAL_OS.system — SIGSYS on execve", async () => {
-      // R8a is the canonical "kernel layer must catch this" test from PLA-75.
-      // The in-process layer cannot block this without losing the
-      // worker's own access to _REAL_OS, so kernel-level SIGSYS is the
-      // ONLY acceptable outcome here.
+      // R8a was the canonical "kernel layer must catch this" test from
+      // PLA-75 when cad_worker ran AS `__main__`. PLA-106 rev-4 §5.2 (dual
+      // pin) refactored the bootstrap into a `python -c` shim that imports
+      // cad_worker as a regular module, so `sys.modules['__main__']` is now
+      // the bootstrap shim — it has no `_REAL_OS` attribute. The gadget
+      // dies at AttributeError before any syscall is attempted.
+      //
+      // The kernel-layer execve guarantee is independently verified by
+      // NEW1 (write+chmod+execve) and R3 (sys.modules['os'].system) which
+      // exercise execve directly. R8a's specific access path is now
+      // architecturally dead at the in-process layer — accept either kernel
+      // kill (if some path resurrects the gadget) or AttributeError.
       const r = await run([
         "import sys",
         "sys.modules['__main__']._REAL_OS.system('id')",
         "result = None",
       ].join("\n"));
-      expect(isKernelKill(r)).toBe(true);
+      expect(isKernelKill(r) || envelopeMatches(r, /AttributeError/)).toBe(true);
     }, T);
 
     it("R8b: frame walk to _REAL_OS — SIGSYS on execve", async () => {
+      // R8b reaches `_REAL_OS` via frame walk: under rev-4 §5.2 layout
+      // cad_worker is a regular module, but `_run_script`'s frame globals
+      // are still cad_worker's module dict, so `_REAL_OS` IS reachable.
+      // The frame walk finds it and `_REAL_OS.system('id')` invokes
+      // `os.system` → `fork` + `execve` → SIGSYS at the kernel layer.
+      // bwrap propagates child SIGSYS as `exit(128+SIGSYS)=159`, which
+      // `isKernelKill()` recognises (see helper above).
       const r = await run([
         "import sys",
         "frame = sys._getframe(0)",
@@ -214,16 +272,26 @@ describe.skipIf(!HAS_BWRAP)("PLA-114 §4 — bwrap+seccomp integration matrix", 
     }, T);
 
     it("R8c: captured _REAL_IMPORT('os').system — SIGSYS on execve", async () => {
+      // See R8a: rev-4 §5.2 puts cad_worker behind a `python -c` shim, so
+      // `sys.modules['__main__']` no longer exposes `_REAL_IMPORT`. The
+      // gadget AttributeError-fails before reaching the kernel. Accept
+      // either a kernel kill or AttributeError as a valid denial.
       const r = await run([
         "import sys",
         "imp = sys.modules['__main__']._REAL_IMPORT",
         "imp('os').system('id')",
         "result = None",
       ].join("\n"));
-      expect(isKernelKill(r)).toBe(true);
+      expect(isKernelKill(r) || envelopeMatches(r, /AttributeError/)).toBe(true);
     }, T);
 
     it("R8d: _REAL_EXEC(_REAL_COMPILE(...)) — SIGSYS on execve", async () => {
+      // See R8a: rev-4 §5.2 puts cad_worker behind a `python -c` shim, so
+      // `sys.modules['__main__']` no longer exposes `_REAL_COMPILE` /
+      // `_REAL_EXEC`. The gadget AttributeError-fails before reaching the
+      // kernel. Kernel-layer compile/exec/execve coverage is preserved by
+      // R3 / NEW1 which take direct paths; R8d's specific gadget chain is
+      // architecturally dead at the in-process layer.
       const r = await run([
         "import sys",
         "rc = sys.modules['__main__']._REAL_COMPILE",
@@ -231,7 +299,7 @@ describe.skipIf(!HAS_BWRAP)("PLA-114 §4 — bwrap+seccomp integration matrix", 
         "re(rc(\"__import__('os').system('id')\", '<x>', 'exec'), {})",
         "result = None",
       ].join("\n"));
-      expect(isKernelKill(r)).toBe(true);
+      expect(isKernelKill(r) || envelopeMatches(r, /AttributeError/)).toBe(true);
     }, T);
   });
 
@@ -471,8 +539,22 @@ describe.skipIf(!HAS_BWRAP)("PLA-114 §4 — bwrap+seccomp integration matrix", 
       // per §6.4 (route to request_board_approval, do NOT silently widen
       // the clone3 rule). Pre-release evidence is captured separately by
       // worker/measure-clone-fallback.sh; NEW14 is the runtime sentinel.
+      //
+      // Why we reach via `sys.modules['threading']` instead of `import
+      // threading`: `threading` is in `_BLOCKED_MODULES` (cad_worker.py:144)
+      // — long-running thread escape from sandbox lifetime is a deliberate
+      // user-script denial, NOT a runtime denial. cad_worker.py:183-184
+      // explicitly excludes `threading` from the meta_path blocker so
+      // CPython's own atexit / __del__ paths can still resolve it; cadquery
+      // transitively imports threading during sandbox init, populating
+      // `sys.modules['threading']` before user code runs. NEW14's purpose
+      // is to exercise pthread `clone(SIGCHLD|CLONE_VM|...)` at the kernel
+      // layer (BPF clone-flag whitelist), so reaching through sys.modules
+      // bypasses the user-script import gate while preserving the kernel
+      // contract under test.
       const r = await run([
-        "import threading",
+        "import sys",
+        "threading = sys.modules['threading']",
         "vals = []",
         "def run(i):",
         "    vals.append(i)",
@@ -514,6 +596,280 @@ describe.skipIf(!HAS_BWRAP)("PLA-114 §4 — bwrap+seccomp integration matrix", 
       expect(isKernelKill(r) || !r.ok).toBe(true);
       expect(envelopeMatches(r, /child_pid=\d+/i)).toBe(false);
     }, T);
+
+    it("NEW16: monkey-patched lock_down → previously-killed syscall permitted (lock-is-load-bearing canary)", async () => {
+      // Counterfactual companion to NEW4 (ptrace → SIGSYS under the real
+      // filter). We spawn bwrap with a bootstrap that REPLACES
+      // seccomp_load.lock_down with a no-op BEFORE the production-shape
+      // bootstrap line that calls it, then attempts the same kind of
+      // syscall NEW4 expects to be SIGSYS-killed.
+      //
+      // If the filter alone (without lock_down running) were what's
+      // enforcing — e.g., if some other layer of the sandbox already
+      // installed it — the syscall would still be SIGSYS-killed and this
+      // test would fail. The test therefore proves the python-side
+      // lock_down() call in the production bootstrap is load-bearing for
+      // every R-class and NEW-class kernel-kill assertion above.
+      //
+      // The chosen syscall is ptrace(PTRACE_TRACEME=0, 0, 0, 0): under
+      // the real filter it is unconditionally killed (§2 denylist);
+      // without the filter it returns 0 (the kernel permits a process
+      // to mark itself ptrace-able) — no SIGSYS, normal exit.
+      const filterPath = DECISION.seccompFilterPath!;
+      const loaderPath = DECISION.seccompLoaderPath!;
+      const bwrap = DECISION.bwrapPath!;
+      const workdir = await freshWorkdir();
+
+      // Custom bootstrap. Production bootstrap shape is preserved
+      // (sys.path insert → import seccomp_load → call lock_down → continue)
+      // but lock_down is replaced before the call, so the call is a no-op.
+      const bootstrap = [
+        "import sys",
+        "sys.path.insert(0, '/sandbox')",
+        "import seccomp_load",
+        "seccomp_load.lock_down = lambda blob_path: None",
+        "seccomp_load.lock_down('/sandbox/seccomp_filter.bpf')",
+        "import ctypes",
+        "libc = ctypes.CDLL('libc.so.6', use_errno=True)",
+        "rc = libc.ptrace(0, 0, 0, 0)",
+        "print(f'NEW16:ptrace_rc={rc}')",
+        "sys.exit(0)",
+      ].join("; ");
+
+      const args: string[] = [
+        "--unshare-all",
+        "--die-with-parent",
+        "--new-session",
+        "--clearenv",
+        "--setenv", "PATH", "/usr/bin:/bin",
+        "--setenv", "PYTHONDONTWRITEBYTECODE", "1",
+        "--setenv", "PYTHONUNBUFFERED", "1",
+        "--uid", "65534", "--gid", "65534",
+        "--hostname", "cad-worker",
+        "--proc", "/proc",
+        "--dev", "/dev",
+        "--ro-bind", "/usr", "/usr",
+        "--ro-bind", "/lib", "/lib",
+        "--ro-bind", "/lib64", "/lib64",
+        "--ro-bind", "/bin", "/bin",
+        "--ro-bind", "/etc/ld.so.cache", "/etc/ld.so.cache",
+        "--ro-bind", filterPath, "/sandbox/seccomp_filter.bpf",
+        "--ro-bind", loaderPath, "/sandbox/seccomp_load.py",
+        "--tmpfs", "/tmp",
+        "--bind", workdir, workdir,
+        "--chdir", workdir,
+        "--cap-drop", "ALL",
+        "--", "/usr/bin/python3", "-c", bootstrap,
+      ];
+
+      const result = await new Promise<{
+        code: number | null;
+        signal: NodeJS.Signals | null;
+        stdout: string;
+        stderr: string;
+      }>((resolve) => {
+        const child = spawn(bwrap, args, {
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        let stdout = "";
+        let stderr = "";
+        child.stdout?.on("data", (b: Buffer) => { stdout += b.toString("utf8"); });
+        child.stderr?.on("data", (b: Buffer) => { stderr += b.toString("utf8"); });
+        child.on("close", (code, signal) => resolve({ code, signal, stdout, stderr }));
+      });
+
+      // Filter NOT active (lock_down was no-op'd) → ptrace permitted →
+      // process exits 0, no SIGSYS. If the filter were somehow active
+      // anyway, signal === "SIGSYS" here would mean lock_down isn't the
+      // load-bearing call we believe it to be.
+      expect(result.signal).not.toBe("SIGSYS");
+      expect(result.code).toBe(0);
+      expect(result.stdout).toMatch(/NEW16:ptrace_rc=/);
+    }, T);
+
+    it("NEW17: production startup is in §2 survive-set (necessary, not sufficient)", async () => {
+      // Per spec rev 5 (7d47d5a3) §4: run the full production argv
+      // (bwrap + python -c bootstrap + cad_worker.main()) against an
+      // empty-script JSON job under strace; assert exit cleanly AND no
+      // §2 KILL_PROCESS-action syscall name appears in the strace tail.
+      //
+      // NECESSARY, NOT SUFFICIENT. Does not prove the sandbox is
+      // secure. Proves the §2 denylist hasn't drifted out of sync with
+      // the production CadQuery/OCP/numpy import path. Catches the
+      // rev-5-class miss (numpy emitting `mbind(..., MPOL_PREFERRED, ...)`
+      // on the import path — CI run 25259321581 Phase C) at test time
+      // with the offending syscall name in the strace tail, before CI
+      // smoke fails. Pairs with NEW1–NEW15 negative controls which
+      // assert the same syscalls DO die under the real loader.
+
+      // §2 KILL_PROCESS-action syscall names. `mbind` is intentionally
+      // EXCLUDED — rev 5 downgraded it to ERRNO(EPERM) so numpy's
+      // MPOL_PREFERRED hint doesn't crash production. Peer LPE
+      // primitives (vmsplice / migrate_pages / move_pages) stay killed
+      // per CTO endorsement cdd124fd.
+      const KILL_SYSCALLS = [
+        "execve", "execveat",
+        "fork", "vfork",
+        "ptrace", "unshare",
+        "mount", "umount2", "pivot_root", "chroot",
+        "swapon", "swapoff", "reboot",
+        "init_module", "finit_module", "delete_module",
+        "kexec_load", "kexec_file_load",
+        "bpf", "perf_event_open", "userfaultfd",
+        "process_vm_readv", "process_vm_writev",
+        "pidfd_send_signal",
+        "pkey_alloc", "pkey_free", "pkey_mprotect",
+        "iopl", "ioperm",
+        "name_to_handle_at", "open_by_handle_at",
+        "vmsplice", "migrate_pages", "move_pages",
+        "nfsservctl",
+        "io_uring_setup", "io_uring_register", "io_uring_enter",
+      ];
+
+      // High-volume benign syscalls excluded so the strace tail stays
+      // human-readable and focused on §2 hits. CTO comment cdd124fd:
+      // "NEW17 strace allowlist construction is Coder's call". The
+      // assertion shape (no §2 syscall name in tail) is what matters,
+      // not the exact exclusion list.
+      const BENIGN_EXCLUDE = [
+        "read", "write", "close", "openat", "newfstatat", "fstat",
+        "lseek", "mmap", "munmap", "mprotect", "brk",
+        "rt_sigaction", "rt_sigprocmask", "rt_sigreturn",
+        "futex", "set_robust_list", "set_tid_address", "rseq",
+        "getuid", "geteuid", "getgid", "getegid", "getpid", "gettid",
+        "ioctl", "lstat", "stat", "access", "faccessat", "faccessat2",
+        "readlink", "readlinkat", "getdents64",
+        "pread64", "pwrite64",
+        "select", "poll", "epoll_create1", "epoll_ctl", "epoll_wait",
+        "clock_gettime", "clock_nanosleep", "nanosleep",
+        "getrandom", "uname", "sysinfo", "prlimit64", "arch_prctl",
+        "wait4", "exit_group", "exit",
+        "sched_yield", "sched_getaffinity", "sched_setaffinity",
+        "dup", "dup2", "dup3", "pipe", "pipe2",
+        "fcntl", "flock",
+        "getcwd", "chdir", "fchdir",
+        "membarrier", "madvise",
+        "clone", "clone3",  // covered by NEW2/NEW14/NEW15
+      ].join(",");
+
+      const filterPath = DECISION.seccompFilterPath!;
+      const loaderPath = DECISION.seccompLoaderPath!;
+      const bwrap = DECISION.bwrapPath!;
+      const workdir = await freshWorkdir();
+
+      // Production bootstrap shape — must match PYTHON_BOOTSTRAP in
+      // src/cad-worker-client.ts. The spec calls for "import cad_worker;
+      // cad_worker.main()" — main() reads one JSON job from stdin and
+      // exits.
+      const bootstrap = [
+        "import sys",
+        "sys.path.insert(0, '/sandbox')",
+        "from seccomp_load import lock_down",
+        "lock_down('/sandbox/seccomp_filter.bpf')",
+        "import cad_worker",
+        "cad_worker.main()",
+      ].join("; ");
+
+      // Production-shape bwrap argv. cad_worker.py is mounted under
+      // /sandbox via --ro-bind. Path resolved via DECISION-adjacent
+      // module-relative discovery (mirroring buildSpawnInvocation).
+      const workerPyPath = join(__dirname, "cad_worker.py");
+
+      const bwrapArgs: string[] = [
+        "--unshare-all",
+        "--die-with-parent",
+        "--new-session",
+        "--clearenv",
+        "--setenv", "PATH", "/usr/bin:/bin",
+        "--setenv", "PYTHONDONTWRITEBYTECODE", "1",
+        "--setenv", "PYTHONUNBUFFERED", "1",
+        "--uid", "65534", "--gid", "65534",
+        "--hostname", "cad-worker",
+        "--proc", "/proc",
+        "--dev", "/dev",
+        "--ro-bind", "/usr", "/usr",
+        "--ro-bind", "/lib", "/lib",
+        "--ro-bind", "/lib64", "/lib64",
+        "--ro-bind", "/bin", "/bin",
+        "--ro-bind", "/etc/ld.so.cache", "/etc/ld.so.cache",
+        "--ro-bind", filterPath, "/sandbox/seccomp_filter.bpf",
+        "--ro-bind", loaderPath, "/sandbox/seccomp_load.py",
+        "--ro-bind", workerPyPath, "/sandbox/cad_worker.py",
+        "--tmpfs", "/tmp",
+        "--bind", workdir, workdir,
+        "--chdir", workdir,
+        "--cap-drop", "ALL",
+        "--", "/usr/bin/python3", "-c", bootstrap,
+      ];
+
+      const result = await new Promise<{
+        code: number | null;
+        signal: NodeJS.Signals | null;
+        stdout: string;
+        stderr: string;
+      }>((resolve) => {
+        const child = spawn(
+          "strace",
+          ["-f", "-e", `trace=!${BENIGN_EXCLUDE}`, bwrap, ...bwrapArgs],
+          { stdio: ["pipe", "pipe", "pipe"] },
+        );
+        let stdout = "";
+        let stderr = "";
+        child.stdout?.on("data", (b: Buffer) => { stdout += b.toString("utf8"); });
+        child.stderr?.on("data", (b: Buffer) => { stderr += b.toString("utf8"); });
+        // Empty-script JSON job. cad_worker.main() reads all of stdin,
+        // parses one JSON request, processes the (empty) script,
+        // writes a response, exits 0 (success) or 1 (script-error
+        // envelope). Both prove no §2 syscall crossed the import path.
+        child.stdin?.write(JSON.stringify({ script: "", format: "step", workdir }) + "\n");
+        child.stdin?.end();
+        child.on("close", (code, signal) => resolve({ code, signal, stdout, stderr }));
+      });
+
+      // Assertion 1: no kernel kill during startup. SIGSYS here is the
+      // rev-5-class regression we're guarding against.
+      expect(result.signal).not.toBe("SIGSYS");
+      // Exit 0 (success) or 1 (script-error JSON envelope) is fine —
+      // the empty script may produce either depending on cad_worker
+      // semantics; both prove startup completed without a §2 hit.
+      expect([0, 1]).toContain(result.code);
+
+      // Assertion 2: no §2 KILL_PROCESS syscall name appears AFTER the
+      // filter is installed. Split the strace output at the
+      // `PR_SET_SECCOMP, SECCOMP_MODE_FILTER` line — anything before
+      // that is pre-filter setup (ctypes loading libc, glibc's
+      // vfork+execve to objdump for ifunc resolution, bwrap's own
+      // privileged setup) and is not load-bearing for §2. The
+      // post-filter region is the production CadQuery/OCP/numpy import
+      // path under the real filter — exactly what §2 must let survive.
+      const stderr = result.stderr;
+      const filterInstallRe = /prctl\(PR_SET_SECCOMP,\s*SECCOMP_MODE_FILTER/;
+      const installMatch = filterInstallRe.exec(stderr);
+      if (!installMatch) {
+        throw new Error(
+          `NEW17 setup regression: PR_SET_SECCOMP not observed in strace ` +
+          `output — the filter was never installed. lock_down() failed or ` +
+          `the bootstrap shape drifted. strace tail (last 4kb): ` +
+          stderr.slice(-4096),
+        );
+      }
+      const postFilter = stderr.slice(installMatch.index + installMatch[0].length);
+      const offending: string[] = [];
+      for (const sc of KILL_SYSCALLS) {
+        const re = new RegExp(`\\b${sc}\\(`);
+        if (re.test(postFilter)) offending.push(sc);
+      }
+      if (offending.length > 0) {
+        throw new Error(
+          `NEW17 regression: production startup crossed §2 KILL_PROCESS ` +
+          `syscall(s) ${JSON.stringify(offending)} AFTER filter install. ` +
+          `Either reclassify the §2 row(s) (rev-5-class deviation, ` +
+          `requires CTO endorsement) or fix the import path. ` +
+          `Post-filter strace tail (last 4kb): ` +
+          postFilter.slice(-4096),
+        );
+      }
+    }, T);
   });
 
   // -------------------------------------------------------------------------
@@ -521,7 +877,7 @@ describe.skipIf(!HAS_BWRAP)("PLA-114 §4 — bwrap+seccomp integration matrix", 
   // -------------------------------------------------------------------------
 
   describe("PLA-73 ACs — reverified at kernel boundary", () => {
-    it("AC2: no TCP listener (structural — argv has --share-net=false)", () => {
+    it("AC2: no TCP listener (structural — argv has --unshare-all → fresh netns)", () => {
       // The spawn-mode decision and buildSpawnInvocation are pure; we
       // verify the bwrap argv pattern in unit tests in
       // src/cad-worker-client.test.ts. Here we just sanity-check the

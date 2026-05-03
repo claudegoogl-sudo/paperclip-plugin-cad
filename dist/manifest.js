@@ -1,4 +1,6 @@
 // src/manifest.ts
+var SECCOMP_FILTER_SHA256_PIN = "6bdbbc4fdfb3d80996c66a812df450c95043a86364fe8955651ec867859617ba";
+var SECCOMP_LOADER_SHA256_PIN = "0fc1b58d38895fb2dc7be1464b1230344530aa7f168af9478fa47153e20f8be0";
 var manifest = {
   id: "platform.cad",
   apiVersion: 1,
@@ -25,14 +27,21 @@ var manifest = {
   runtimeRequirements: {
     kernelSandbox: "bubblewrap"
   },
-  // PLA-114 acceptance — pin the seccomp filter blob digest. The build
+  // PLA-114 acceptance — pin the seccomp filter blob digest AND the
+  // python-side loader shim digest (rev-4 §5.2 dual pin). The build
   // script reads `worker/seccomp_filter.bpf.sha256` (produced by
-  // `make -C worker`) and substitutes the value here at build time. The
-  // literal below is a placeholder; an unsubstituted placeholder failing
-  // a sha256 length check at startup is the intended fail-closed signal.
+  // `make -C worker`) and computes sha256 of `worker/seccomp_load.py`,
+  // substituting both values at build time. Literals below are
+  // placeholders; an unsubstituted placeholder failing a sha256 length
+  // check at startup is the intended fail-closed signal. The dual pin
+  // closes the substitution-attack window where an attacker swaps the
+  // loader (which calls prctl(PR_SET_SECCOMP)) for a no-op while leaving
+  // the filter blob unchanged.
   worker: {
     seccompFilterPath: "./worker/seccomp_filter.bpf",
-    seccompFilterSha256: "__PLA114_SECCOMP_FILTER_SHA256__"
+    seccompFilterSha256: "6bdbbc4fdfb3d80996c66a812df450c95043a86364fe8955651ec867859617ba",
+    seccompLoaderPath: "./worker/seccomp_load.py",
+    seccompLoaderSha256: "0fc1b58d38895fb2dc7be1464b1230344530aa7f168af9478fa47153e20f8be0"
   },
   // instanceConfigSchema — ties secret-scope strictly to githubPatSecretId
   // (PLA-41 remediation #2). Fields validated by the host before plugin load.
@@ -125,6 +134,8 @@ var manifest = {
 };
 var manifest_default = manifest;
 export {
+  SECCOMP_FILTER_SHA256_PIN,
+  SECCOMP_LOADER_SHA256_PIN,
   manifest_default as default
 };
 //# sourceMappingURL=manifest.js.map

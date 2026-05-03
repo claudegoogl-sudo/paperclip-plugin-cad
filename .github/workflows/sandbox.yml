@@ -26,6 +26,13 @@ jobs:
   sandbox:
     name: bwrap + seccomp integration
     runs-on: ubuntu-latest
+    # `pull-requests: write` is needed by the diagnostic step that posts
+    # the §6.4 evidence file as a PR comment when the measurement fails;
+    # `contents: read` is the default for non-write workflows. Both kept
+    # minimal and scoped to this job.
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
 
@@ -37,17 +44,38 @@ jobs:
           bwrap --version
           pkg-config --modversion libseccomp
 
+      - name: Allow unprivileged user namespaces (GHA Ubuntu 24.04 workaround)
+        run: |
+          # Ubuntu 24.04 ships with kernel.apparmor_restrict_unprivileged_userns=1,
+          # which blocks netlink RTM_NEWADDR inside an unprivileged user
+          # namespace. bwrap's --unshare-net codepath calls loopback_setup()
+          # which fails with EPERM on the GHA runner. Flip the sysctl off so
+          # bwrap can bring up `lo` inside the sandbox netns. This affects only
+          # the runner kernel for the duration of the job; production hosts
+          # have CAP_NET_ADMIN at the bwrap layer and don't need this.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          # Same setting under unprivileged_userns_clone (older kernels):
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: npm
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install Python worker deps
-        run: pip install -r worker/requirements-cad.txt
+      # Install cadquery into the SYSTEM python (/usr/bin/python3). The bwrap
+      # sandbox argv only mounts `/usr` (and `/lib`, `/lib64`, `/bin`,
+      # `/etc/ld.so.cache`) — the actions/setup-python hostedtoolcache path
+      # at /opt/hostedtoolcache/Python/... is NOT visible inside the
+      # sandbox, so any cadquery installed via the GitHub-managed python
+      # would be invisible to the worker. We therefore install with the
+      # system interpreter and `--break-system-packages` (required by
+      # PEP 668 on Ubuntu 24.04, which is acceptable for a single-purpose
+      # CI runner).
+      - name: Install Python worker deps (into /usr/bin/python3 site-packages)
+        run: |
+          /usr/bin/python3 --version
+          sudo /usr/bin/python3 -m pip install --break-system-packages -r worker/requirements-cad.txt
+          /usr/bin/python3 -c "import cadquery; print('host cadquery=', cadquery.__version__)"
 
       - name: npm install
         run: npm ci
@@ -74,15 +102,39 @@ jobs:
       - name: Capture clone3 ENOSYS-fallback evidence (PLA-106 §6.4)
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
           # Spec rev 3 (3ffe6af0) §6.4: before the seccomp filter blob can be
           # locked for a release, the deploy-class host must produce three
           # measurement rows demonstrating the clone3 -> ENOSYS -> clone(2)
           # fallback works under the production seccomp filter. The script
           # exits 1 on the (4,0) outcome, which fails the build per spec
           # (escalation is board-approval-class, not silent retry).
+          #
+          # Diagnostic-enrichment (this commit): merge stderr into the same
+          # stream the artifact captures (2>&1) so a failing measurement row
+          # surfaces with full python tracebacks / bwrap diagnostics in the
+          # uploaded artifact, not just in the GHA log buffer. Also run each
+          # step individually after `all` so the failing step is named
+          # explicitly in CI output even when `all` short-circuits at step1
+          # under set -euo pipefail (per script comment lines 207-212, this
+          # is the supported diagnostic technique). Per CTO 15:56 directive,
+          # any failing step still fails the build — no masks.
           install -d evidence
-          ./worker/measure-clone-fallback.sh all | tee evidence/clone-fallback-ci.md
+          echo "=== measure-clone-fallback.sh all ==="
+          ./worker/measure-clone-fallback.sh all 2>&1 | tee evidence/clone-fallback-ci.md
+          rc_all=${PIPESTATUS[0]}
+          echo "all-exit=$rc_all"
+          if [[ $rc_all -ne 0 ]]; then
+            echo "=== diagnostic: step-by-step localization ==="
+            for s in s1 s2 s3; do
+              echo "--- $s ---" | tee -a evidence/clone-fallback-ci.md
+              ./worker/measure-clone-fallback.sh "$s" 2>&1 | tee -a evidence/clone-fallback-ci.md
+              rc_step=${PIPESTATUS[0]}
+              echo "$s-exit=$rc_step" | tee -a evidence/clone-fallback-ci.md
+            done
+            echo "::error::§6.4 measurement script failed (all-exit=$rc_all) — see uploaded artifact evidence/clone-fallback-ci.md and the per-step localization above."
+            exit $rc_all
+          fi
 
       - name: Upload §6.4 measurement artifact
         if: always()
@@ -95,6 +147,223 @@ jobs:
             worker/seccomp_filter.bpf.sha256
           if-no-files-found: error
 
+      - name: Post §6.4 evidence inline on failure (diagnostic surface)
+        # GHA artifact downloads require auth even for public repos; PR
+        # comments do not. Posting the evidence file as a PR comment lets
+        # the assignee inspect failure rows from the public comments API
+        # without needing a fresh GitHub PAT. Diagnostic-only — runs only
+        # when the §6.4 step failed and only on PR events. The body is
+        # fenced so markdown table characters render as-is.
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = 'evidence/clone-fallback-ci.md';
+            const body = fs.existsSync(path)
+              ? fs.readFileSync(path, 'utf8')
+              : '(evidence/clone-fallback-ci.md not produced — script failed before any output)';
+            const sha = '${{ github.event.pull_request.head.sha }}';
+            const url = '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}';
+            const truncated = body.length > 60000 ? body.slice(0, 60000) + '\n... (truncated)' : body;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## CI §6.4 measurement failure — diagnostic dump\n\nCommit: \`${sha}\`\nRun: ${url}\n\n<details><summary>evidence/clone-fallback-ci.md</summary>\n\n\`\`\`\n${truncated}\n\`\`\`\n\n</details>`,
+            });
+
+      - name: Sandbox smoke — verify bwrap+seccomp can spawn python
+        # Diagnostic gate: runs bwrap with the EXACT argv the production
+        # spawn path uses (mirrors buildSpawnInvocation in
+        # src/cad-worker-client.ts) and feeds it a no-op python program.
+        # If this step fails, the bwrap test matrix below cannot succeed
+        # either, and the stderr captured here is the load-bearing
+        # diagnostic for the failure (the test envelope only surfaces
+        # "Worker produced no output on stdout. stderr: ..." which is
+        # invisible to a vanilla `toBe(true)` assertion). Keeps the CI
+        # cycle short by failing here instead of after a 30-test rerun.
+        shell: bash
+        run: |
+          set -uo pipefail
+          install -d /tmp/cad-bwrap-smoke
+          # Pre-flight: dump the host-side toolchain (which python, where pip
+          # installed cadquery). The bwrap world only sees /usr/bin:/bin via
+          # PATH, so if `pip install` landed cadquery in hostedtoolcache it is
+          # invisible inside the sandbox. This printout makes that mismatch
+          # impossible to miss.
+          echo "host: which bwrap = $(command -v bwrap || echo MISSING)"
+          bwrap --version || true
+          echo "host: which python3 (PATH lookup) = $(command -v python3 || echo MISSING)"
+          /usr/bin/python3 --version || true
+          /usr/bin/python3 -c "import cadquery, sys; print('host /usr/bin/python3 cadquery=', cadquery.__version__)" 2>&1 || \
+            echo "host /usr/bin/python3: cadquery NOT importable"
+          cat > /tmp/cad-bwrap-smoke/probe.py <<'PY'
+          import sys
+          print("bwrap-smoke: python=", sys.version.split()[0], "exe=", sys.executable)
+          try:
+              import cadquery
+              print("bwrap-smoke: cadquery=", cadquery.__version__)
+          except Exception as e:  # noqa: BLE001
+              print("bwrap-smoke: cadquery import FAILED:", repr(e))
+              sys.exit(2)
+          sys.exit(0)
+          PY
+          # Mirror the rlimits from defaultRlimits() in cad-worker-client.ts
+          # (asBytes=2GiB, nproc=64, nofile=256, fsize=256MiB, cpu=t+5,
+          # core=0). Mismatched values would confuse the diagnostic.
+          # Bubblewrap 0.9.0 (Ubuntu 24.04) does not expose --rlimit-* flags;
+          # rlimits are applied by the cad_preexec wrapper invoked between
+          # bwrap and python, exactly as buildSpawnInvocation does for the
+          # non-native-rlimits codepath in cad-worker-client.ts.
+          PREEXEC="$PWD/worker/cad_preexec"
+          test -x "$PREEXEC" || { echo "missing $PREEXEC"; exit 2; }
+          set +e
+
+          # ----- Phase A: bwrap-only (no seccomp), /bin/echo --------------
+          # Validates that bwrap+namespaces+ro-binds work on this runner,
+          # independent of seccomp. If this fails, the issue is bwrap/userns,
+          # not the filter blob.
+          echo "=== Phase A: bwrap-only smoke ==="
+          bwrap --unshare-all --die-with-parent --new-session --clearenv \
+            --setenv PATH /usr/bin:/bin \
+            --uid 65534 --gid 65534 --hostname cad-worker \
+            --proc /proc --dev /dev \
+            --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
+            --ro-bind /bin /bin --ro-bind /etc/ld.so.cache /etc/ld.so.cache \
+            --tmpfs /tmp --cap-drop ALL \
+            -- /bin/echo "phase-A: bwrap-only OK"
+          rcA=$?
+          echo "phase-A exit=$rcA"
+
+          # ----- Phase B: bwrap+seccomp via python-side install -----------
+          # PLA-106 §1 rev 4: the BPF blob is delivered into the sandbox via
+          # --ro-bind, and the python bootstrap installs it via prctl after
+          # trusted import-time setup. Phase B exercises the loader shim end-
+          # to-end without invoking cad_worker — if lock_down() succeeds and
+          # python exits 0, the python-side install path works on this runner.
+          # If this fails with 159 (SIGSYS), the filter is killing a syscall
+          # the python bootstrap itself emits (read/openat/mmap/etc.) and the
+          # filter source needs investigation.
+          echo "=== Phase B: bwrap + python-side seccomp install ==="
+          FILTER_BLOB="$PWD/worker/seccomp_filter.bpf"
+          LOADER_SHIM="$PWD/worker/seccomp_load.py"
+          test -s "$FILTER_BLOB" || { echo "missing $FILTER_BLOB"; exit 2; }
+          test -s "$LOADER_SHIM" || { echo "missing $LOADER_SHIM"; exit 2; }
+          bwrap --unshare-all --die-with-parent --new-session --clearenv \
+            --setenv PATH /usr/bin:/bin \
+            --setenv PYTHONDONTWRITEBYTECODE 1 --setenv PYTHONUNBUFFERED 1 \
+            --uid 65534 --gid 65534 --hostname cad-worker \
+            --proc /proc --dev /dev \
+            --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
+            --ro-bind /bin /bin --ro-bind /etc/ld.so.cache /etc/ld.so.cache \
+            --ro-bind "$FILTER_BLOB" /sandbox/seccomp_filter.bpf \
+            --ro-bind "$LOADER_SHIM" /sandbox/seccomp_load.py \
+            --tmpfs /tmp --cap-drop ALL \
+            -- /usr/bin/python3 -c "import sys; sys.path.insert(0, '/sandbox'); from seccomp_load import lock_down; lock_down('/sandbox/seccomp_filter.bpf'); print('phase-B: lock_down OK')"
+          rcB=$?
+          echo "phase-B exit=$rcB"
+
+          # ----- Phase C: full production argv ----------------------------
+          # Mirrors buildSpawnInvocation in src/cad-worker-client.ts for the
+          # non-native-rlimits codepath. Mounts the filter blob, the loader
+          # shim, and cad_worker.py at /sandbox/, runs python -c with the
+          # production bootstrap, and feeds a no-op job via stdin so
+          # cad_worker.main() exits cleanly.
+          echo "=== Phase C: bwrap+seccomp+preexec+python (full production argv) ==="
+          WORKER_PY="$PWD/src/cad_worker.py"
+          test -s "$WORKER_PY" || { echo "missing $WORKER_PY"; exit 2; }
+          # cad_worker.main() reads a JSON job from stdin. A trivial empty-
+          # script job should round-trip without writing artifacts; if the
+          # script-execution path errors, we just need a non-SIGSYS exit so
+          # the smoke gate can demonstrate the python-side seccomp install
+          # didn't kill the worker before main() ran.
+          PROBE_JOB='{"script":"","format":"step","workdir":"/tmp/cad-bwrap-smoke"}'
+          BOOTSTRAP="import sys; sys.path.insert(0, '/sandbox'); from seccomp_load import lock_down; lock_down('/sandbox/seccomp_filter.bpf'); import cad_worker; cad_worker.main()"
+          echo "$PROBE_JOB" | bwrap \
+            --unshare-all \
+            --die-with-parent \
+            --new-session \
+            --clearenv \
+            --setenv PATH /usr/bin:/bin \
+            --setenv HOME /tmp \
+            --setenv LANG C.UTF-8 \
+            --setenv PYTHONDONTWRITEBYTECODE 1 \
+            --setenv PYTHONHASHSEED random \
+            --setenv PYTHONUNBUFFERED 1 \
+            --setenv CAD_PREEXEC_RLIMIT_AS 2147483648 \
+            --setenv CAD_PREEXEC_RLIMIT_NPROC 64 \
+            --setenv CAD_PREEXEC_RLIMIT_NOFILE 256 \
+            --setenv CAD_PREEXEC_RLIMIT_FSIZE 268435456 \
+            --setenv CAD_PREEXEC_RLIMIT_CPU 35 \
+            --setenv CAD_PREEXEC_RLIMIT_CORE 0 \
+            --uid 65534 --gid 65534 \
+            --hostname cad-worker \
+            --proc /proc \
+            --dev /dev \
+            --ro-bind /usr /usr \
+            --ro-bind /lib /lib \
+            --ro-bind /lib64 /lib64 \
+            --ro-bind /bin /bin \
+            --ro-bind /etc/ld.so.cache /etc/ld.so.cache \
+            --ro-bind "$FILTER_BLOB" /sandbox/seccomp_filter.bpf \
+            --ro-bind "$LOADER_SHIM" /sandbox/seccomp_load.py \
+            --ro-bind "$WORKER_PY" /sandbox/cad_worker.py \
+            --ro-bind "$PREEXEC" "$PREEXEC" \
+            --tmpfs /tmp \
+            --bind /tmp/cad-bwrap-smoke /tmp/cad-bwrap-smoke \
+            --chdir /tmp/cad-bwrap-smoke \
+            --cap-drop ALL \
+            -- "$PREEXEC" /usr/bin/python3 -c "$BOOTSTRAP"
+          rc=$?
+          echo "bwrap-smoke exit=$rc"
+          # SIGSYS = 128+31 = 159. Anything other than 159 means the filter
+          # didn't kill the worker bootstrap; a non-zero exit from
+          # cad_worker.main() processing an empty-script job is acceptable
+          # here (the smoke gate's job is to prove the seccomp install
+          # itself works, not that the worker is bug-free).
+          if [[ $rc -eq 159 ]]; then
+            # SIGSYS — kernel logs an audit record naming the killed syscall.
+            # The audit record format on Linux is:
+            #   audit: type=1326 audit(...): auid=... uid=... pid=... comm="python3" exe="/usr/bin/python3" sig=31 arch=c000003e syscall=NN compat=0 ip=... code=0x0
+            # `syscall=NN` is the kill-trigger. We capture the last 50
+            # seccomp-related lines from dmesg so the diagnostic comment
+            # has the syscall number to look up.
+            echo "=== dmesg seccomp audit (post-SIGSYS) ==="
+            sudo dmesg | grep -E "seccomp|type=1326" | tail -50 | tee /tmp/cad-bwrap-smoke/dmesg-seccomp.log || echo "(no seccomp/audit lines in dmesg)"
+            echo "::error::bwrap+seccomp smoke killed by SIGSYS (exit 159) — see dmesg seccomp audit above for the killed syscall number. The bwrap test matrix cannot pass while this is failing."
+            exit $rc
+          fi
+          if [[ $rcB -ne 0 ]]; then
+            echo "::error::Phase B (python-side seccomp install) failed with exit $rcB — the loader shim cannot complete prctl(PR_SET_SECCOMP) on this runner. Investigate seccomp_load.py and the filter blob before the matrix runs."
+            exit $rcB
+          fi
+
+      - name: Post smoke-step SIGSYS dmesg on failure (diagnostic surface)
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = '/tmp/cad-bwrap-smoke/dmesg-seccomp.log';
+            const dmesg = fs.existsSync(path)
+              ? fs.readFileSync(path, 'utf8')
+              : '(no dmesg-seccomp.log produced — smoke step may not have reached the dmesg capture, or sudo dmesg returned no audit lines)';
+            // Look up the syscall number on x86_64. Common offenders post-
+            // lock_down: 165 mount, 167 swapon, 169 reboot, 92 chown, 90 chmod,
+            // 101 ptrace, 321 bpf, 425 io_uring_setup, 435 clone3, 56 clone,
+            // 59 execve, 322 execveat. The diagnostic comment includes the
+            // raw audit line so the reviewer can resolve the number directly.
+            const sha = '${{ github.event.pull_request.head.sha }}';
+            const url = '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}';
+            const trunc = dmesg.length > 50000 ? dmesg.slice(0, 50000) + '\n... (truncated)' : dmesg;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## CI smoke-step SIGSYS — diagnostic dump\n\nCommit: \`${sha}\`\nRun: ${url}\n\nKernel audit record naming the killed syscall (search \`syscall=N\`):\n\n<details><summary>dmesg | grep seccomp</summary>\n\n\`\`\`\n${trunc}\n\`\`\`\n\n</details>\n\nLook up the syscall number against \`/usr/include/asm/unistd_64.h\` or use \`ausyscall <NN>\` on the runner.`,
+            });
+
       - name: Build TypeScript bundles
         run: npm run build
 
@@ -102,7 +371,41 @@ jobs:
         run: npm run typecheck
 
       - name: Run bwrap integration matrix
-        run: npx vitest run --config ./vitest.config.ts src/sandbox.bwrap.test.ts
+        # Tee the vitest output to a file so the PR-comment-on-failure
+        # step can surface it through the public unauthenticated comments
+        # API. Without this, step-18 failures are opaque to anyone
+        # without `actions:read` on the runs API.
+        run: |
+          set -o pipefail
+          npx vitest run --config ./vitest.config.ts src/sandbox.bwrap.test.ts 2>&1 | tee evidence/bwrap-matrix.log
+
+      - name: Post bwrap matrix tail on failure (diagnostic surface)
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = 'evidence/bwrap-matrix.log';
+            let body;
+            if (!fs.existsSync(path)) {
+              body = `## CI bwrap integration matrix failure — log not captured\n\n` +
+                `Commit: \`${context.sha}\`\nRun: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            } else {
+              const log = fs.readFileSync(path, 'utf8');
+              // Last ~12kb is enough to see vitest's failure summary plus
+              // the afterEach diag dumps.
+              const tail = log.length > 12000 ? log.slice(-12000) : log;
+              body = `## CI bwrap integration matrix failure — diagnostic dump\n\n` +
+                `Commit: \`${context.sha}\`\nRun: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n\n` +
+                `<details><summary>vitest tail (last 12kb)</summary>\n\n` +
+                "```\n" + tail + "\n```\n\n</details>";
+            }
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body,
+            });
 
       - name: Run perf tests (PLA-106 §6.2 gates)
         run: npx vitest run --config ./vitest.config.ts src/sandbox.bwrap.perf.test.ts
