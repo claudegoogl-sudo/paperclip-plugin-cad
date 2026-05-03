@@ -1,6 +1,24 @@
 import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
 
 /**
+ * PLA-215 / PLA-114 §5.2 — exported pin constants for **runtime** sha256
+ * verification.
+ *
+ * The literal placeholders below are substituted by `esbuild.config.mjs`
+ * at build time in BOTH `dist/manifest.js` (where the manifest object
+ * carries them for host capability negotiation) AND `dist/worker.js`
+ * (where these constants are inlined via the bundled cad-worker-client
+ * import path — see esbuild's per-entrypoint bundling). The runtime
+ * verifier in `cad-worker-client.ts` reads these constants and refuses
+ * to launch the worker on either a sha256 mismatch OR an unsubstituted
+ * placeholder (length ≠ 64 hex chars). The dual placeholder substitution
+ * is what closes the rev-4 §5.2 substitution-attack window — a build
+ * that fails to substitute is fail-closed at the first launch.
+ */
+export const SECCOMP_FILTER_SHA256_PIN = "__PLA114_SECCOMP_FILTER_SHA256__";
+export const SECCOMP_LOADER_SHA256_PIN = "__PLA114_SECCOMP_LOADER_SHA256__";
+
+/**
  * PLA-114 / PLA-106 §5.2 — declare the kernel-sandbox requirement in the
  * manifest. The host capability negotiation refuses to install the plugin
  * on a host that does not advertise this requirement met (bubblewrap on
