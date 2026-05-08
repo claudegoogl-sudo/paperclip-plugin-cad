@@ -20,6 +20,20 @@ CFLAGS  ?= -O2 -Wall -Wextra -Wpedantic
 LDLIBS_SECCOMP := $(shell pkg-config --libs libseccomp 2>/dev/null || echo -lseccomp)
 CFLAGS_SECCOMP := $(shell pkg-config --cflags libseccomp 2>/dev/null)
 
+# PLA-216 Obs 1 — sock_filter instruction floor.
+#
+# Pins the lower bound on the number of `struct sock_filter` instructions in
+# the compiled BPF blob. Each sock_filter is 8 bytes on Linux (__u16 code,
+# __u8 jt, __u8 jf, __u32 k), so the count is `wc -c < seccomp_filter.bpf` / 8.
+# A drop below this floor means a rule was silently dropped from
+# seccomp_filter.c (editor accident, bad merge resolve, refactor) — the §5.2
+# dual sha pin only catches *substitution*, not *attrition*. Bumping this
+# value requires a deliberate change AND a security review note: the
+# `SECCOMP_RULE_FLOOR=N` comment block in worker/seccomp_filter.c tracks
+# the source-of-truth half of the pair so a rule-deletion PR diff surfaces
+# both halves in one review pane.
+MIN_SOCK_FILTER_COUNT ?= 99
+
 ARTIFACTS := seccomp_filter.bpf seccomp_filter.bpf.sha256 cad_preexec
 
 .PHONY: all clean
@@ -34,6 +48,14 @@ seccomp_filter_compile: seccomp_filter.c
 
 seccomp_filter.bpf: seccomp_filter_compile
 	./seccomp_filter_compile > $@.tmp
+	@actual=$$(( $$(wc -c < $@.tmp) / 8 )); \
+	expected=$(MIN_SOCK_FILTER_COUNT); \
+	if [ "$$actual" -lt "$$expected" ]; then \
+	  echo "ERROR: $@ has $$actual sock_filter instructions, expected at least $$expected — did a rule get deleted?" >&2; \
+	  echo "       (See SECCOMP_RULE_FLOOR comment in worker/seccomp_filter.c — PLA-216 Obs 1.)" >&2; \
+	  rm -f $@.tmp; \
+	  exit 1; \
+	fi
 	mv $@.tmp $@
 
 seccomp_filter.bpf.sha256: seccomp_filter.bpf
