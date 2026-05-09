@@ -56,8 +56,18 @@
      CLONE_CHILD_CLEARTID)
 
 /*
- * Helper: add a kill-process rule for a syscall name. Logs and aborts on
- * failure — partial filter is worse than no filter.
+ * Helper: add a kill-process rule for a syscall name. Aborts the build on
+ * any libseccomp failure — partial filter is worse than no filter.
+ *
+ * PLA-216 Obs 2: previously this helper logged and continued on
+ * `seccomp_rule_add` failure on the rationale that "the syscall may simply
+ * not exist on this build of libseccomp". That left a silent-degradation
+ * gap: a libseccomp upgrade that renamed/dropped a syscall, or any other
+ * cause of negative return (allocator failure during filter construction,
+ * arch resolution failure, duplicate-rule action conflict), would silently
+ * produce a filter missing that rule. The Makefile sock_filter floor
+ * (PLA-216 Obs 1) catches mass attrition, but a single missing rule sits
+ * below the floor's resolution. Fail loudly here.
  */
 static void kill_syscall(scmp_filter_ctx ctx, const char *name)
 {
@@ -66,20 +76,16 @@ static void kill_syscall(scmp_filter_ctx ctx, const char *name)
         /* Some syscalls (e.g. create_module, query_module on modern kernels)
          * may resolve to a negative pseudo-syscall; that is libseccomp's way
          * of saying "the kernel doesn't expose this anymore but we'll filter
-         * by number anyway". Fall through to seccomp_rule_add_exact below. */
+         * by number anyway". Try the arch-scoped resolver before giving up. */
+        sc = seccomp_syscall_resolve_name_arch(SCMP_ARCH_NATIVE, name);
     }
-    int rc = seccomp_rule_add(ctx, SCMP_ACT_KILL_PROCESS,
-                              sc != __NR_SCMP_ERROR ? sc :
-                              seccomp_syscall_resolve_name_arch(SCMP_ARCH_NATIVE,
-                                                                name),
-                              0);
+    int rc = seccomp_rule_add(ctx, SCMP_ACT_KILL_PROCESS, sc, 0);
     if (rc < 0) {
         fprintf(stderr,
-                "seccomp_rule_add(%s): %s\n", name, strerror(-rc));
-        /* Don't abort: the syscall may simply not exist on this build of
-         * libseccomp. The runtime kernel will still enforce whatever rules
-         * we successfully added. The build script verifies the resulting
-         * filter has the expected denylist length. */
+                "seccomp_rule_add(%s, KILL_PROCESS): %s (rc=%d)\n",
+                name, strerror(-rc), rc);
+        seccomp_release(ctx);
+        exit(2);
     }
 }
 
@@ -93,6 +99,21 @@ int main(void)
         fprintf(stderr, "seccomp_init failed\n");
         return 1;
     }
+
+    /*
+     * SECCOMP_RULE_FLOOR=99 — keep in sync with worker/Makefile
+     * MIN_SOCK_FILTER_COUNT. Bumping N requires a security review note.
+     *
+     * The number is the minimum count of `struct sock_filter` BPF
+     * instructions the libseccomp compiler emits for this filter. The
+     * Makefile target `seccomp_filter.bpf` rejects any blob below the
+     * floor with an "expected at least N — did a rule get deleted?"
+     * diagnostic. The pair (this comment + the Makefile constant) makes
+     * a rule-deletion PR diff surface both halves of the floor in a
+     * single review pane: a reviewer doesn't have to remember to cross-
+     * check worker/Makefile when the only visible change is a removed
+     * `kill_syscall(...)` line. See PLA-216 Obs 1.
+     */
 
     /* ===== execve family ===== */
     kill_syscall(ctx, "execve");
@@ -235,7 +256,34 @@ int main(void)
     kill_syscall(ctx, "vmsplice");
     kill_syscall(ctx, "migrate_pages");
     kill_syscall(ctx, "move_pages");
-    kill_syscall(ctx, "mbind");
+    /* PLA-106 spec rev 5 (7d47d5a3) §2: mbind action change
+     * KILL_PROCESS -> ERRNO(EPERM). Numpy/OCP emit advisory
+     * mbind(..., MPOL_PREFERRED, ...) NUMA hints on the CadQuery import
+     * path (CI run 25259321581 Phase C dmesg + local strace reproduction).
+     * EPERM is no weaker than SIGSYS for the attacker (zero-effect syscall
+     * either way) but lets benign callers fall back gracefully. The
+     * dangerous MPOL_* modes already EPERM under our cap-drop posture
+     * (no CAP_SYS_NICE); ERRNO uniforms that across the full mode set.
+     *
+     * Peer LPE primitives (vmsplice, migrate_pages, move_pages) explicitly
+     * stay KILL_PROCESS per CTO endorsement cdd124fd: no observed legit
+     * caller, LPE-primitive nature unchanged.
+     *
+     * PLA-216 Obs 2: rc check added to close the silent-degradation gap
+     * — duplicate-action conflict, allocator failure, or arch resolution
+     * failure during filter construction must abort the build, not
+     * silently leave mbind unfiltered. */
+    {
+        int rc = seccomp_rule_add(ctx, SCMP_ACT_ERRNO(EPERM),
+                                  SCMP_SYS(mbind), 0);
+        if (rc < 0) {
+            fprintf(stderr,
+                    "seccomp_rule_add(mbind, ERRNO EPERM): %s (rc=%d)\n",
+                    strerror(-rc), rc);
+            seccomp_release(ctx);
+            return 1;
+        }
+    }
     /* personality(): kill only when arg != 0. arg=0 is a benign "what
      * personality am I?" query that some libc implementations issue at
      * startup. The spec lists this as conditional. */
@@ -246,9 +294,12 @@ int main(void)
                 ctx, SCMP_ACT_KILL_PROCESS, sc_pers, 1,
                 SCMP_A0(SCMP_CMP_NE, 0));
             if (rc < 0) {
+                /* PLA-216 Obs 2: was log-and-continue; now aborts. */
                 fprintf(stderr,
-                        "seccomp_rule_add(personality, !=0): %s\n",
-                        strerror(-rc));
+                        "seccomp_rule_add(personality, !=0): %s (rc=%d)\n",
+                        strerror(-rc), rc);
+                seccomp_release(ctx);
+                return 1;
             }
         }
     }
