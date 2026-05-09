@@ -1,0 +1,63 @@
+name: Plugin manifest validation (release gate)
+
+# PLA-376 — release-time check that runs the host plugin-manifest validator
+# against the built `dist/manifest.js` BEFORE a tarball can be packed or
+# published. v0.1.1 shipped with `cad:run_script` tool names (post-PLA-163
+# regex rejects `:`) and the release passed CI before the operator's
+# install attempt revealed the manifest was unloadable. This gate makes
+# the same class of regression a build failure instead.
+
+on:
+  pull_request:
+    paths:
+      - 'src/manifest.ts'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'esbuild.config.mjs'
+      - 'scripts/validate-manifest.mjs'
+      - 'src/validate-manifest.test.ts'
+      - '.github/workflows/manifest-validate.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/manifest.ts'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'esbuild.config.mjs'
+      - 'scripts/validate-manifest.mjs'
+      - 'src/validate-manifest.test.ts'
+      - '.github/workflows/manifest-validate.yml'
+
+jobs:
+  validate-manifest:
+    name: validate dist/manifest.js against pluginManifestV1Schema
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Build manifest (and worker)
+        run: npm run build
+
+      - name: Run regression test (PLA-376)
+        # Proves the gate catches the v0.1.1 incident shape before we
+        # ever invoke it on the actual built manifest.
+        run: npx vitest run --config ./vitest.config.ts src/validate-manifest.test.ts
+
+      - name: Validate built manifest
+        # Resolves the manifest module via package.json's
+        # paperclipPlugin.manifest field and validates it against
+        # pluginManifestV1Schema (and the PLA-163 tool-name allowlist).
+        # Exits non-zero on any failure with a clear list of offending
+        # fields — same code path that runs in `npm prepack`.
+        run: npm run validate:manifest
