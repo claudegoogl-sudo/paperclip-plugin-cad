@@ -4,6 +4,27 @@ Tracker: [PLA-32](/PLA/issues/PLA-32)
 
 ---
 
+## v0.1.1 — 2026-05-09
+
+### Fixed
+
+- **Tool dispatch returned HTTP 500 for every `platform.cad:run_script` and
+  `platform.cad:export` call.** The worker registered tool handlers under
+  the literal keys `"cad:run_script"` / `"cad:export"`, but the host parses
+  the namespaced name `platform.cad:<tool>` and RPCs the worker with the
+  bare tool name (`run_script` / `export`). The worker therefore looked up
+  a key that did not exist and threw
+  `No tool handler registered for "<bare-name>"`. Worker `register(...)`
+  keys are now bare (`"run_script"`, `"export"`), matching the host RPC
+  contract. ([PLA-354](/PLA/issues/PLA-354),
+  [plugin-cad#7](https://github.com/claudegoogl-sudo/paperclip-plugin-cad/issues/7))
+
+No tool surface or schema changes — same two tools, same parameters,
+same return shapes. Operator install of v0.1.1 unblocks the AC chain
+on PLA-308 and PLA-353.
+
+---
+
 ## v0.1.0 — 2026-05-01
 
 ### Tools

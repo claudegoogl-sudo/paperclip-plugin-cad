@@ -385,10 +385,11 @@ const plugin = definePlugin({
     const anyCtx = ctx as AnyCtx;
 
     // ------------------------------------------------------------------
-    // cad:run_script
+    // run_script (manifest tool name; host strips the platform.cad: namespace
+    // before RPC-dispatching to the worker — see plugin-cad#7 / PLA-354)
     // ------------------------------------------------------------------
     ctx.tools.register(
-      "cad:run_script",
+      "run_script",
       {
         displayName: "CAD Run Script",
         description: "Execute a CadQuery Python script. Returns { artifactId, summary }.",
@@ -479,10 +480,11 @@ const plugin = definePlugin({
     );
 
     // ------------------------------------------------------------------
-    // cad:export  (PLA-55 tool surface + PLA-56 GitHub commit pipeline)
+    // export  (PLA-55 tool surface + PLA-56 GitHub commit pipeline)
+    // Host strips the platform.cad: namespace — see plugin-cad#7 / PLA-354.
     // ------------------------------------------------------------------
     ctx.tools.register(
-      "cad:export",
+      "export",
       {
         displayName: "CAD Export",
         description:

@@ -70,8 +70,8 @@ beforeAll(async () => {
   };
   await plugin.default?.setup?.(ctx);
 
-  cadRunScript = handlers["cad:run_script"];
-  cadExport = handlers["cad:export"];
+  cadRunScript = handlers["run_script"];
+  cadExport = handlers["export"];
   if (typeof cadRunScript !== "function") throw new Error("cad:run_script not registered");
   if (typeof cadExport !== "function") throw new Error("cad:export not registered");
 });
@@ -302,7 +302,7 @@ describe("cad:export PLA-56 pipeline", () => {
     const plugin2 = (await import("./worker.js")) as { default?: { setup?: (ctx: unknown) => Promise<void> } };
     await plugin2.default?.setup?.(customCtx);
 
-    const runResult = (await handlers["cad:run_script"]({ script: BOX_SCRIPT }, DEFAULT_RUN_CTX)) as { data?: { artifactId?: string } };
+    const runResult = (await handlers["run_script"]({ script: BOX_SCRIPT }, DEFAULT_RUN_CTX)) as { data?: { artifactId?: string } };
     const artifactId = runResult.data?.artifactId!;
 
     const fetchMock = vi.mocked(globalThis.fetch);
@@ -312,7 +312,7 @@ describe("cad:export PLA-56 pipeline", () => {
     fetchMock.mockResolvedValueOnce(notFound());
     fetchMock.mockResolvedValueOnce(putOk("sha-custom"));
 
-    await handlers["cad:export"]({ ...BASE_PARAMS, artifactId }, DEFAULT_RUN_CTX);
+    await handlers["export"]({ ...BASE_PARAMS, artifactId }, DEFAULT_RUN_CTX);
 
     const allUrls = fetchMock.mock.calls.map((c) =>
       typeof c[0] === "string" ? c[0] : (c[0] as Request).url,
@@ -596,10 +596,10 @@ describe("cad:export PLA-74 F4 — strict URL parsing", () => {
     const plugin2 = (await import("./worker.js")) as { default?: { setup?: (ctx: unknown) => Promise<void> } };
     await plugin2.default?.setup?.(customCtx);
 
-    const runResult = (await handlers["cad:run_script"]({ script: BOX_SCRIPT }, DEFAULT_RUN_CTX)) as { data?: { artifactId?: string } };
+    const runResult = (await handlers["run_script"]({ script: BOX_SCRIPT }, DEFAULT_RUN_CTX)) as { data?: { artifactId?: string } };
     const artifactId = runResult.data?.artifactId!;
 
-    const result = (await handlers["cad:export"]({
+    const result = (await handlers["export"]({
       artifactId, format: "step" as const,
       paperclipTicketId: "PLA-56", toolCallId: "call-1",
     }, DEFAULT_RUN_CTX)) as { data?: { error?: string; message?: string } };
@@ -619,10 +619,10 @@ describe("cad:export PLA-74 F4 — strict URL parsing", () => {
     const plugin2 = (await import("./worker.js")) as { default?: { setup?: (ctx: unknown) => Promise<void> } };
     await plugin2.default?.setup?.(customCtx);
 
-    const runResult = (await handlers["cad:run_script"]({ script: BOX_SCRIPT }, DEFAULT_RUN_CTX)) as { data?: { artifactId?: string } };
+    const runResult = (await handlers["run_script"]({ script: BOX_SCRIPT }, DEFAULT_RUN_CTX)) as { data?: { artifactId?: string } };
     const artifactId = runResult.data?.artifactId!;
 
-    const result = (await handlers["cad:export"]({
+    const result = (await handlers["export"]({
       artifactId, format: "step" as const,
       paperclipTicketId: "PLA-56", toolCallId: "call-1",
     }, DEFAULT_RUN_CTX)) as { data?: { error?: string } };

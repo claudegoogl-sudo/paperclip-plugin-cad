@@ -834,7 +834,7 @@ describe("AC1+AC8 — cad:run_script end-to-end via worker.ts", () => {
     };
     await plugin.default?.setup?.(ctx);
 
-    const runScript = handlers["cad:run_script"];
+    const runScript = handlers["run_script"];
     expect(runScript).toBeDefined();
 
     const result = (await runScript({
