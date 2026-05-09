@@ -29,7 +29,7 @@ type ManifestWithRuntimeRequirements = PaperclipPluginManifestV1 & {
 const manifest: ManifestWithRuntimeRequirements = {
   id: "platform.cad",
   apiVersion: 1,
-  version: "0.1.0",
+  version: "0.1.1",
   displayName: "CAD (CadQuery)",
   description:
     "Lets agents design and export 3D CAD models via CadQuery tool calls. " +

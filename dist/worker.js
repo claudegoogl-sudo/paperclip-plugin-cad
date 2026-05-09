@@ -600,7 +600,7 @@ var plugin = definePlugin({
     ctx.logger.info("CAD plugin worker starting");
     const anyCtx = ctx;
     ctx.tools.register(
-      "cad:run_script",
+      "run_script",
       {
         displayName: "CAD Run Script",
         description: "Execute a CadQuery Python script. Returns { artifactId, summary }.",
@@ -677,7 +677,7 @@ var plugin = definePlugin({
       }
     );
     ctx.tools.register(
-      "cad:export",
+      "export",
       {
         displayName: "CAD Export",
         description: "Export a staged CAD artifact to the configured GitHub artifact repo. Returns { commitSha, permalink, artifactPath }. Idempotent per toolCallId.",

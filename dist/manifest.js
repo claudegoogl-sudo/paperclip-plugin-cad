@@ -2,7 +2,7 @@
 var manifest = {
   id: "platform.cad",
   apiVersion: 1,
-  version: "0.1.0",
+  version: "0.1.1",
   displayName: "CAD (CadQuery)",
   description: "Lets agents design and export 3D CAD models via CadQuery tool calls. v0.1.0 surface: cad:run_script (execute Python \u2192 staged artifact) and cad:export (staged artifact \u2192 GitHub commit + permalink). Operator-confirmed via approval f420bc31.",
   author: "Platform",
