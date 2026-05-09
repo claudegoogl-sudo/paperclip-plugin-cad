@@ -1,5 +1,5 @@
 /**
- * Tests for PLA-55 (cad:run_script + cad:export tool API surface) and
+ * Tests for PLA-55 (cad.run_script + cad.export tool API surface) and
  * PLA-56 (artifact persistence pipeline — AC6 happy path updated for GitHub commit).
  *
  * Acceptance criteria covered:
@@ -89,12 +89,12 @@ beforeAll(async () => {
 // ---------------------------------------------------------------------------
 
 describe("AC1: tool registration", () => {
-  it("registers cad:run_script", () => {
-    expect(typeof handlers["run_script"]).toBe("function");
+  it("registers cad.run_script", () => {
+    expect(typeof handlers["cad.run_script"]).toBe("function");
   });
 
-  it("registers cad:export", () => {
-    expect(typeof handlers["export"]).toBe("function");
+  it("registers cad.export", () => {
+    expect(typeof handlers["cad.export"]).toBe("function");
   });
 
   it("AC7: does NOT register cad:hello", () => {
@@ -108,12 +108,12 @@ describe("AC1: tool registration", () => {
 });
 
 // ---------------------------------------------------------------------------
-// AC2 + AC5: Input validation — cad:run_script
+// AC2 + AC5: Input validation — cad.run_script
 // ---------------------------------------------------------------------------
 
-describe("cad:run_script — input validation (AC2/AC5)", () => {
+describe("cad.run_script — input validation (AC2/AC5)", () => {
   it("returns validation_error when script is missing", async () => {
-    const result = (await handlers["run_script"]({}, fakeRunCtx)) as {
+    const result = (await handlers["cad.run_script"]({}, fakeRunCtx)) as {
       error?: string;
       data?: { code?: string; statusCode?: number };
     };
@@ -123,14 +123,14 @@ describe("cad:run_script — input validation (AC2/AC5)", () => {
   });
 
   it("returns validation_error when script is empty string", async () => {
-    const result = (await handlers["run_script"]({ script: "" }, fakeRunCtx)) as {
+    const result = (await handlers["cad.run_script"]({ script: "" }, fakeRunCtx)) as {
       data?: { code?: string };
     };
     expect(result.data?.code).toBe("validation_error");
   });
 
   it("returns validation_error when timeout is out of range", async () => {
-    const result = (await handlers["run_script"](
+    const result = (await handlers["cad.run_script"](
       { script: "import cadquery as cq", timeout: 9999 },
       fakeRunCtx,
     )) as { data?: { code?: string } };
@@ -138,14 +138,14 @@ describe("cad:run_script — input validation (AC2/AC5)", () => {
   });
 
   it("returns validation_error when params is not an object", async () => {
-    const result = (await handlers["run_script"]("not-an-object", fakeRunCtx)) as {
+    const result = (await handlers["cad.run_script"]("not-an-object", fakeRunCtx)) as {
       data?: { code?: string };
     };
     expect(result.data?.code).toBe("validation_error");
   });
 
   it("error message contains no stack trace", async () => {
-    const result = (await handlers["run_script"]({}, fakeRunCtx)) as {
+    const result = (await handlers["cad.run_script"]({}, fakeRunCtx)) as {
       data?: { message?: string };
     };
     expect(result.data?.message).not.toMatch(/\s+at\s+/);
@@ -153,12 +153,12 @@ describe("cad:run_script — input validation (AC2/AC5)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// AC2 + AC5: Input validation — cad:export
+// AC2 + AC5: Input validation — cad.export
 // ---------------------------------------------------------------------------
 
-describe("cad:export — input validation (AC2/AC5)", () => {
+describe("cad.export — input validation (AC2/AC5)", () => {
   it("returns validation_error when artifactId is missing", async () => {
-    const result = (await handlers["export"](
+    const result = (await handlers["cad.export"](
       { format: "step" },
       fakeRunCtx,
     )) as { data?: { code?: string; statusCode?: number } };
@@ -167,7 +167,7 @@ describe("cad:export — input validation (AC2/AC5)", () => {
   });
 
   it("returns validation_error when format is invalid", async () => {
-    const result = (await handlers["export"](
+    const result = (await handlers["cad.export"](
       { artifactId: "some-id", format: "obj" },
       fakeRunCtx,
     )) as { data?: { code?: string } };
@@ -175,7 +175,7 @@ describe("cad:export — input validation (AC2/AC5)", () => {
   });
 
   it("returns validation_error when artifactId is empty", async () => {
-    const result = (await handlers["export"](
+    const result = (await handlers["cad.export"](
       { artifactId: "", format: "stl" },
       fakeRunCtx,
     )) as { data?: { code?: string } };
@@ -188,42 +188,42 @@ describe("cad:export — input validation (AC2/AC5)", () => {
 // ---------------------------------------------------------------------------
 
 describe("AC3: metrics", () => {
-  it("emits tool.calls on cad:run_script success", async () => {
+  it("emits tool.calls on cad.run_script success", async () => {
     const before = metricCalls.length;
-    await handlers["run_script"](
+    await handlers["cad.run_script"](
       { script: "import cadquery as cq; result = cq.Workplane().box(1,1,1)" },
       fakeRunCtx,
     );
     const calls = metricCalls.slice(before);
-    const m = calls.find((c) => c.name === "tool.calls" && c.tags?.tool === "cad:run_script");
+    const m = calls.find((c) => c.name === "tool.calls" && c.tags?.tool === "cad.run_script");
     expect(m).toBeDefined();
     expect(m?.value).toBe(1);
   });
 
   it("emits tool.duration_ms on every call", async () => {
     const before = metricCalls.length;
-    await handlers["run_script"](
+    await handlers["cad.run_script"](
       { script: "import cadquery as cq; result = cq.Workplane().box(2,2,2)" },
       fakeRunCtx,
     );
     const calls = metricCalls.slice(before);
-    const m = calls.find((c) => c.name === "tool.duration_ms" && c.tags?.tool === "cad:run_script");
+    const m = calls.find((c) => c.name === "tool.duration_ms" && c.tags?.tool === "cad.run_script");
     expect(m).toBeDefined();
     expect(typeof m?.value).toBe("number");
   });
 
   it("emits tool.errors on validation failure", async () => {
     const before = metricCalls.length;
-    await handlers["run_script"]({}, fakeRunCtx);
+    await handlers["cad.run_script"]({}, fakeRunCtx);
     const calls = metricCalls.slice(before);
-    const m = calls.find((c) => c.name === "tool.errors" && c.tags?.tool === "cad:run_script");
+    const m = calls.find((c) => c.name === "tool.errors" && c.tags?.tool === "cad.run_script");
     expect(m).toBeDefined();
     expect(m?.value).toBe(1);
   });
 
   it("does NOT emit tool.errors on success", async () => {
     const before = metricCalls.length;
-    await handlers["run_script"](
+    await handlers["cad.run_script"](
       { script: "import cadquery as cq; result = cq.Workplane().box(3,3,3)" },
       fakeRunCtx,
     );
@@ -240,7 +240,7 @@ describe("AC3: metrics", () => {
 describe("AC4: correlation log", () => {
   it("logs correlationId, tool, agentId, status, durationMs on success", async () => {
     const before = logInfoCalls.length;
-    await handlers["run_script"](
+    await handlers["cad.run_script"](
       { script: "import cadquery as cq; result = cq.Workplane('XY').box(5,5,5)" },
       fakeRunCtx,
     );
@@ -249,7 +249,7 @@ describe("AC4: correlation log", () => {
       .find((l) => l.message === "tool call complete");
     expect(completionLog).toBeDefined();
     expect(completionLog?.meta.correlationId).toBe(fakeRunCtx.runId);
-    expect(completionLog?.meta.tool).toBe("cad:run_script");
+    expect(completionLog?.meta.tool).toBe("cad.run_script");
     expect(completionLog?.meta.agentId).toBe(fakeRunCtx.agentId);
     expect(completionLog?.meta.status).toBe("ok");
     expect(typeof completionLog?.meta.durationMs).toBe("number");
@@ -258,7 +258,7 @@ describe("AC4: correlation log", () => {
   it("does NOT log script content in any log call", async () => {
     const sentinel = "PAYLOAD_SENTINEL_" + Math.random().toString(36).slice(2);
     const before = logInfoCalls.length;
-    await handlers["run_script"]({ script: sentinel }, fakeRunCtx);
+    await handlers["cad.run_script"]({ script: sentinel }, fakeRunCtx);
     const allLogs = logInfoCalls.slice(before);
     for (const entry of allLogs) {
       expect(JSON.stringify(entry)).not.toContain(sentinel);
@@ -271,8 +271,8 @@ describe("AC4: correlation log", () => {
 // ---------------------------------------------------------------------------
 
 describe("AC5: error taxonomy — worker_internal", () => {
-  it("cad:export returns worker_internal (500) for unknown artifactId", async () => {
-    const result = (await handlers["export"](
+  it("cad.export returns worker_internal (500) for unknown artifactId", async () => {
+    const result = (await handlers["cad.export"](
       { artifactId: "nonexistent-artifact-id-xyz", format: "step" },
       fakeRunCtx,
     )) as { data?: { code?: string; statusCode?: number } };
@@ -287,7 +287,7 @@ describe("AC5: error taxonomy — worker_internal", () => {
 
 describe("AC6: stub worker happy path", () => {
   it("run_script returns { artifactId, summary }", async () => {
-    const result = (await handlers["run_script"](
+    const result = (await handlers["cad.run_script"](
       { script: "import cadquery as cq; result = cq.Workplane('XY').box(10,10,10)" },
       fakeRunCtx,
     )) as { data?: { artifactId?: string; summary?: string } };
@@ -297,13 +297,13 @@ describe("AC6: stub worker happy path", () => {
   });
 
   it("export returns { filePath, artifactId, format } when GitHub params absent (local export)", async () => {
-    const runResult = (await handlers["run_script"](
+    const runResult = (await handlers["cad.run_script"](
       { script: "import cadquery as cq; result = cq.Workplane('XY').box(20,20,20)" },
       fakeRunCtx,
     )) as { data?: { artifactId?: string } };
     const artifactId = runResult.data?.artifactId;
 
-    const exportResult = (await handlers["export"](
+    const exportResult = (await handlers["cad.export"](
       { artifactId, format: "stl" },
       fakeRunCtx,
     )) as { data?: { filePath?: string; artifactId?: string; format?: string } };
@@ -314,14 +314,14 @@ describe("AC6: stub worker happy path", () => {
   });
 
   it("export accepts all three formats: step, stl, 3mf", async () => {
-    const runResult = (await handlers["run_script"](
+    const runResult = (await handlers["cad.run_script"](
       { script: "import cadquery as cq; result = cq.Workplane('XY').box(5,5,5)" },
       fakeRunCtx,
     )) as { data?: { artifactId?: string } };
     const artifactId = runResult.data?.artifactId as string;
 
     for (const format of ["step", "stl", "3mf"] as const) {
-      const r = (await handlers["export"](
+      const r = (await handlers["cad.export"](
         { artifactId, format },
         fakeRunCtx,
       )) as { data?: { filePath?: string } };

@@ -106,7 +106,7 @@ export function createCadWorker(): CadWorker {
       const entry = artifactRegistry.get(artifactId);
       if (!entry) {
         throw new CadWorkerInternalError(
-          `Unknown artifactId: ${artifactId}. Ensure cad:run_script was called first.`,
+          `Unknown artifactId: ${artifactId}. Ensure cad.run_script was called first.`,
         );
       }
 

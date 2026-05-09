@@ -10,20 +10,20 @@ Install the plugin from the Paperclip board:
 2. Create a Paperclip secret for your GitHub Personal Access Token (PAT) with `repo` scope.
 3. In the plugin instance config, set `githubPatSecretId` to the UUID of that secret.
 
-The plugin registers two tools on every agent it is enabled for: `cad:run_script` and `cad:export`.
+The plugin registers two tools on every agent it is enabled for: `cad.run_script` and `cad.export`.
 
 ## Minimal example
 
 ```
 # Execute a CadQuery script — returns a staged artifact ID
-Tool call: cad:run_script
+Tool call: cad.run_script
 {
   "script": "import cadquery as cq\nresult = cq.Workplane('XY').box(1, 1, 1)"
 }
 → { "artifactId": "cad-artifact-a1b2c3d4", "summary": "Box 1×1×1 mm" }
 
 # Export the staged artifact and commit it to the configured GitHub artifact repo
-Tool call: cad:export
+Tool call: cad.export
 {
   "artifactId": "cad-artifact-a1b2c3d4",
   "format": "step",

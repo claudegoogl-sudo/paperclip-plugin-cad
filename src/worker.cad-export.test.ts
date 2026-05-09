@@ -1,7 +1,7 @@
 /**
- * Tests for PLA-56: cad:export GitHub artifact persistence pipeline.
+ * Tests for PLA-56: cad.export GitHub artifact persistence pipeline.
  *
- * Flow: cad:run_script → cad:export (commit to GitHub).
+ * Flow: cad.run_script → cad.export (commit to GitHub).
  *
  * Acceptance criteria covered:
  *   AC1  Prerequisite check: 404/403 on repo → prerequisite_missing.
@@ -70,10 +70,10 @@ beforeAll(async () => {
   };
   await plugin.default?.setup?.(ctx);
 
-  cadRunScript = handlers["run_script"];
-  cadExport = handlers["export"];
-  if (typeof cadRunScript !== "function") throw new Error("cad:run_script not registered");
-  if (typeof cadExport !== "function") throw new Error("cad:export not registered");
+  cadRunScript = handlers["cad.run_script"];
+  cadExport = handlers["cad.export"];
+  if (typeof cadRunScript !== "function") throw new Error("cad.run_script not registered");
+  if (typeof cadExport !== "function") throw new Error("cad.export not registered");
 });
 
 afterAll(() => {
@@ -83,18 +83,18 @@ afterAll(() => {
 
 const BOX_SCRIPT = "import cadquery as cq\nresult = cq.Workplane('XY').box(1, 1, 1)";
 
-// Helper: stage an artifact via cad:run_script.
+// Helper: stage an artifact via cad.run_script.
 async function stageArtifact(
   script = BOX_SCRIPT,
   runCtx: Record<string, string> = DEFAULT_RUN_CTX,
 ): Promise<string> {
   const r = (await cadRunScript({ script }, runCtx)) as { data?: { artifactId?: string } };
   const id = r.data?.artifactId;
-  if (!id) throw new Error("cad:run_script did not return artifactId");
+  if (!id) throw new Error("cad.run_script did not return artifactId");
   return id;
 }
 
-// Helper: invoke cad:export with a tenant-scoped runCtx.
+// Helper: invoke cad.export with a tenant-scoped runCtx.
 async function exportArtifact(
   params: Record<string, unknown>,
   runCtx: Record<string, string> = DEFAULT_RUN_CTX,
@@ -102,7 +102,7 @@ async function exportArtifact(
   return cadExport(params, runCtx);
 }
 
-// Mock helpers for the GitHub call sequence in cad:export:
+// Mock helpers for the GitHub call sequence in cad.export:
 //   1. GET /repos/{owner}/{repo}         — prereq check
 //   2. GET /repos/{owner}/{repo}/contents/{path}  — idempotency check
 //   3. GET /repos/{owner}/{repo}/contents/{path}  — push: existing sha check
@@ -126,7 +126,7 @@ const BASE_PARAMS = {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe("cad:export PLA-56 pipeline", () => {
+describe("cad.export PLA-56 pipeline", () => {
   it("AC1: prereq check — 404 → prerequisite_missing", async () => {
     const artifactId = await stageArtifact();
     const fetchMock = vi.mocked(globalThis.fetch);
@@ -203,7 +203,7 @@ describe("cad:export PLA-56 pipeline", () => {
     expect(JSON.stringify(result)).not.toContain("ghp_fake_token_pla56");
   });
 
-  it("AC5: commit message format: ticket=... tool=cad:export call=...", async () => {
+  it("AC5: commit message format: ticket=... tool=cad.export call=...", async () => {
     const artifactId = await stageArtifact();
     const fetchMock = vi.mocked(globalThis.fetch);
     fetchMock.mockReset();
@@ -216,7 +216,7 @@ describe("cad:export PLA-56 pipeline", () => {
 
     const putCall = fetchMock.mock.calls.find((c) => (c[1] as RequestInit | undefined)?.method === "PUT");
     const body = JSON.parse((putCall![1] as RequestInit).body as string) as { message?: string };
-    expect(body.message).toBe("CAD artifact: ticket=PLA-999 tool=cad:export call=tc-abc123");
+    expect(body.message).toBe("CAD artifact: ticket=PLA-999 tool=cad.export call=tc-abc123");
     expect(body.message).not.toContain("ghp_");
   });
 
@@ -302,7 +302,7 @@ describe("cad:export PLA-56 pipeline", () => {
     const plugin2 = (await import("./worker.js")) as { default?: { setup?: (ctx: unknown) => Promise<void> } };
     await plugin2.default?.setup?.(customCtx);
 
-    const runResult = (await handlers["run_script"]({ script: BOX_SCRIPT }, DEFAULT_RUN_CTX)) as { data?: { artifactId?: string } };
+    const runResult = (await handlers["cad.run_script"]({ script: BOX_SCRIPT }, DEFAULT_RUN_CTX)) as { data?: { artifactId?: string } };
     const artifactId = runResult.data?.artifactId!;
 
     const fetchMock = vi.mocked(globalThis.fetch);
@@ -312,7 +312,7 @@ describe("cad:export PLA-56 pipeline", () => {
     fetchMock.mockResolvedValueOnce(notFound());
     fetchMock.mockResolvedValueOnce(putOk("sha-custom"));
 
-    await handlers["export"]({ ...BASE_PARAMS, artifactId }, DEFAULT_RUN_CTX);
+    await handlers["cad.export"]({ ...BASE_PARAMS, artifactId }, DEFAULT_RUN_CTX);
 
     const allUrls = fetchMock.mock.calls.map((c) =>
       typeof c[0] === "string" ? c[0] : (c[0] as Request).url,
@@ -399,7 +399,7 @@ describe("cad:export PLA-56 pipeline", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("F6: cad:run_script rejects when runCtx is missing tenant context", async () => {
+  it("F6: cad.run_script rejects when runCtx is missing tenant context", async () => {
     const result = (await cadRunScript({ script: BOX_SCRIPT }, {})) as {
       error?: string;
       data?: { code?: string };
@@ -408,14 +408,14 @@ describe("cad:export PLA-56 pipeline", () => {
     expect(result.data?.code).toBe("validation_error");
   });
 
-  it("F6: cad:export with missing tenant runCtx is treated as not-found (no oracle)", async () => {
+  it("F6: cad.export with missing tenant runCtx is treated as not-found (no oracle)", async () => {
     // First, stage as agent A.
     const ctxA = { companyId: "co-A", agentId: "agent-A", runId: "r-A", projectId: "p" };
     const artifactId = await stageArtifact(BOX_SCRIPT, ctxA);
 
     const fetchMock = vi.mocked(globalThis.fetch);
     fetchMock.mockReset();
-    // Now call cad:export with empty runCtx — must look exactly like missing.
+    // Now call cad.export with empty runCtx — must look exactly like missing.
     const result = (await cadExport({ artifactId, format: "step" as const }, {})) as {
       data?: { code?: string; statusCode?: number; message?: string };
     };
@@ -442,7 +442,7 @@ describe("cad:export PLA-56 pipeline", () => {
 // All cases must return validation_error and MUST NOT call fetch.
 // ---------------------------------------------------------------------------
 
-describe("cad:export PLA-74 F1/F2 — input allowlist (path-traversal + commit-injection)", () => {
+describe("cad.export PLA-74 F1/F2 — input allowlist (path-traversal + commit-injection)", () => {
   // Each test stages a real artifact then submits an adversarial input. The
   // expected outcome is a fail-closed validation_error with no outbound fetch.
   it("F1.1: rejects paperclipTicketId='../..' with validation_error", { timeout: 15000 }, async () => {
@@ -585,7 +585,7 @@ describe("cad:export PLA-74 F1/F2 — input allowlist (path-traversal + commit-i
 // PLA-74 F4 — strict URL parsing for parseGitHubUrl
 // ---------------------------------------------------------------------------
 
-describe("cad:export PLA-74 F4 — strict URL parsing", () => {
+describe("cad.export PLA-74 F4 — strict URL parsing", () => {
   it("F4: rejects http:// (non-https) artifactRepoUrl with prerequisite_missing", { timeout: 15000 }, async () => {
     vi.resetModules();
     const { ctx: customCtx, handlers } = buildMockCtx("ghp_x", {
@@ -596,10 +596,10 @@ describe("cad:export PLA-74 F4 — strict URL parsing", () => {
     const plugin2 = (await import("./worker.js")) as { default?: { setup?: (ctx: unknown) => Promise<void> } };
     await plugin2.default?.setup?.(customCtx);
 
-    const runResult = (await handlers["run_script"]({ script: BOX_SCRIPT }, DEFAULT_RUN_CTX)) as { data?: { artifactId?: string } };
+    const runResult = (await handlers["cad.run_script"]({ script: BOX_SCRIPT }, DEFAULT_RUN_CTX)) as { data?: { artifactId?: string } };
     const artifactId = runResult.data?.artifactId!;
 
-    const result = (await handlers["export"]({
+    const result = (await handlers["cad.export"]({
       artifactId, format: "step" as const,
       paperclipTicketId: "PLA-56", toolCallId: "call-1",
     }, DEFAULT_RUN_CTX)) as { data?: { error?: string; message?: string } };
@@ -619,10 +619,10 @@ describe("cad:export PLA-74 F4 — strict URL parsing", () => {
     const plugin2 = (await import("./worker.js")) as { default?: { setup?: (ctx: unknown) => Promise<void> } };
     await plugin2.default?.setup?.(customCtx);
 
-    const runResult = (await handlers["run_script"]({ script: BOX_SCRIPT }, DEFAULT_RUN_CTX)) as { data?: { artifactId?: string } };
+    const runResult = (await handlers["cad.run_script"]({ script: BOX_SCRIPT }, DEFAULT_RUN_CTX)) as { data?: { artifactId?: string } };
     const artifactId = runResult.data?.artifactId!;
 
-    const result = (await handlers["export"]({
+    const result = (await handlers["cad.export"]({
       artifactId, format: "step" as const,
       paperclipTicketId: "PLA-56", toolCallId: "call-1",
     }, DEFAULT_RUN_CTX)) as { data?: { error?: string } };

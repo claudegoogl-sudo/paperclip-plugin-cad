@@ -4,6 +4,37 @@ Tracker: [PLA-32](/PLA/issues/PLA-32)
 
 ---
 
+## v0.1.2 — 2026-05-09
+
+### Fixed
+
+- **Plugin install rejected on hosts carrying [PLA-163](/PLA/issues/PLA-163)'s
+  tightened tool-name validator.** The v0.1.1 manifest declared
+  `tools[].name` as `cad:run_script` and `cad:export`, but the host validator
+  enforces `/^[a-z0-9][a-z0-9._-]*$/` — the colon is rejected. Renamed the
+  tool surface from `cad:<verb>` to `cad.<verb>`:
+  - `cad:run_script` → `cad.run_script`
+  - `cad:export` → `cad.export`
+  Worker dispatch keys (`ctx.tools.register(...)`) and the metric/log `tool`
+  label values follow the manifest names. The host parses the namespaced
+  full name `platform.cad:cad.run_script` via `lastIndexOf(":")` and
+  RPC-dispatches the worker with bare key `cad.run_script`
+  (see `plugin-tool-registry.ts:247`). ([PLA-374](/PLA/issues/PLA-374),
+  unblocks [PLA-368](/PLA/issues/PLA-368))
+
+### Notes
+
+- Tool *behaviour*, parameter shapes, and return shapes are unchanged —
+  this is a pure rename. Agents currently invoking `cad:run_script` /
+  `cad:export` must update their tool-call sites.
+- The commit-message format produced by `cad.export` now reads
+  `CAD artifact: ticket=<id> tool=cad.export call=<id>` (was `tool=cad:export`).
+  Past commits remain valid; only new artifacts use the new label.
+- Observability dashboards/alerts that key on `tool=cad:run_script` /
+  `tool=cad:export` must be updated to the dot form.
+
+---
+
 ## v0.1.1 — 2026-05-09
 
 ### Fixed
