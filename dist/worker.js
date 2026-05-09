@@ -13,7 +13,7 @@ import { execSync } from "node:child_process";
 import { createHash } from "node:crypto";
 
 // src/manifest.ts
-var SECCOMP_FILTER_SHA256_PIN = "6bdbbc4fdfb3d80996c66a812df450c95043a86364fe8955651ec867859617ba";
+var SECCOMP_FILTER_SHA256_PIN = "__PLA114_SECCOMP_FILTER_SHA256__";
 var SECCOMP_LOADER_SHA256_PIN = "0fc1b58d38895fb2dc7be1464b1230344530aa7f168af9478fa47153e20f8be0";
 
 // src/stub-cad-worker.ts
@@ -659,7 +659,7 @@ var plugin = definePlugin({
     ctx.logger.info("CAD plugin worker starting");
     const anyCtx = ctx;
     ctx.tools.register(
-      "run_script",
+      "cad.run_script",
       {
         displayName: "CAD Run Script",
         description: "Execute a CadQuery Python script. Returns { artifactId, summary }.",
@@ -675,7 +675,7 @@ var plugin = definePlugin({
       },
       async (params, runCtxRaw) => {
         const runCtx = runCtxRaw ?? {};
-        const tool = "cad:run_script";
+        const tool = "cad.run_script";
         const t0 = Date.now();
         if (typeof params !== "object" || params === null) {
           const ms2 = Date.now() - t0;
@@ -702,19 +702,19 @@ var plugin = definePlugin({
         const script = p.script;
         const timeoutSeconds = typeof p.timeout === "number" ? p.timeout : DEFAULT_TIMEOUT_SECONDS;
         if (typeof runCtx.companyId !== "string" || runCtx.companyId.length === 0 || typeof runCtx.agentId !== "string" || runCtx.agentId.length === 0) {
-          ctx.logger.warn("cad:run_script: missing tenant context on runCtx");
+          ctx.logger.warn("cad.run_script: missing tenant context on runCtx");
           const ms2 = Date.now() - t0;
           await emitMetrics(anyCtx, tool, ms2, true);
           logCompletion(ctx, tool, runCtx, ms2, "error");
           return validationError("missing tenant context (companyId/agentId) on runCtx");
         }
-        ctx.logger.info("cad:run_script: rendering", { scriptLength: script.length, timeoutSeconds });
+        ctx.logger.info("cad.run_script: rendering", { scriptLength: script.length, timeoutSeconds });
         let stepPath;
         try {
           stepPath = await renderCadScript(script, timeoutSeconds);
         } catch (err) {
           const msg = err instanceof Error ? err.message : "Unknown worker error";
-          ctx.logger.warn("cad:run_script: worker error", { error: msg });
+          ctx.logger.warn("cad.run_script: worker error", { error: msg });
           const ms2 = Date.now() - t0;
           await emitMetrics(anyCtx, tool, ms2, true);
           logCompletion(ctx, tool, runCtx, ms2, "error");
@@ -725,7 +725,7 @@ var plugin = definePlugin({
           stagingMapKey(runCtx.companyId, runCtx.agentId, artifactId),
           { script, stepPath }
         );
-        ctx.logger.info("cad:run_script: staged", { artifactId });
+        ctx.logger.info("cad.run_script: staged", { artifactId });
         const ms = Date.now() - t0;
         await emitMetrics(anyCtx, tool, ms, false);
         logCompletion(ctx, tool, runCtx, ms, "ok");
@@ -736,14 +736,14 @@ var plugin = definePlugin({
       }
     );
     ctx.tools.register(
-      "export",
+      "cad.export",
       {
         displayName: "CAD Export",
         description: "Export a staged CAD artifact to the configured GitHub artifact repo. Returns { commitSha, permalink, artifactPath }. Idempotent per toolCallId.",
         parametersSchema: {
           type: "object",
           properties: {
-            artifactId: { type: "string", description: "Artifact ID from cad:run_script." },
+            artifactId: { type: "string", description: "Artifact ID from cad.run_script." },
             format: { type: "string", enum: ["step", "stl", "3mf"], description: "Output format." },
             paperclipTicketId: {
               type: "string",
@@ -767,7 +767,7 @@ var plugin = definePlugin({
       },
       async (params, runCtxRaw) => {
         const runCtx = runCtxRaw ?? {};
-        const tool = "cad:export";
+        const tool = "cad.export";
         const t0 = Date.now();
         if (typeof params !== "object" || params === null) {
           const ms = Date.now() - t0;
@@ -835,15 +835,15 @@ var plugin = definePlugin({
             return validationError(fErr);
           }
         }
-        ctx.logger.info("cad:export: starting", { artifactId, format });
+        ctx.logger.info("cad.export: starting", { artifactId, format });
         const hasTenantCtx = typeof runCtx.companyId === "string" && runCtx.companyId.length > 0 && typeof runCtx.agentId === "string" && runCtx.agentId.length > 0;
         const stagingEntry = hasTenantCtx ? artifactStagingMap.get(stagingMapKey(runCtx.companyId, runCtx.agentId, artifactId)) : void 0;
         if (!stagingEntry) {
-          ctx.logger.warn("cad:export: unknown artifactId", { artifactId });
+          ctx.logger.warn("cad.export: unknown artifactId", { artifactId });
           const ms = Date.now() - t0;
           await emitMetrics(anyCtx, tool, ms, true);
           logCompletion(ctx, tool, runCtx, ms, "error");
-          return workerInternalError(`No staged artifact for artifactId: ${artifactId}. Call cad:run_script first.`);
+          return workerInternalError(`No staged artifact for artifactId: ${artifactId}. Call cad.run_script first.`);
         }
         if (!paperclipTicketId || !toolCallId) {
           try {
@@ -876,19 +876,19 @@ var plugin = definePlugin({
         const repoPath = `artifacts/${ticketIdStr}/${toolCallIdStr}/${resolvedFilename}`;
         const pathErr = assertSafeRepoPath(repoPath);
         if (pathErr) {
-          ctx.logger.warn("cad:export: repoPath assertion failed", { pathErr });
+          ctx.logger.warn("cad.export: repoPath assertion failed", { pathErr });
           const ms = Date.now() - t0;
           await emitMetrics(anyCtx, tool, ms, true);
           logCompletion(ctx, tool, runCtx, ms, "error");
           return validationError(pathErr);
         }
-        ctx.logger.info("cad:export: resolving GitHub PAT");
+        ctx.logger.info("cad.export: resolving GitHub PAT");
         const pat = await ctx.secrets.resolve(config.githubPatSecretId);
         try {
           await checkRepoPrerequisite(pat, repoUrl);
         } catch (err) {
           if (err instanceof PushError && err.kind === "prerequisite_missing") {
-            ctx.logger.warn("cad:export: prerequisite failed", { repoUrl, httpStatus: err.httpStatus });
+            ctx.logger.warn("cad.export: prerequisite failed", { repoUrl, httpStatus: err.httpStatus });
             const ms = Date.now() - t0;
             await emitMetrics(anyCtx, tool, ms, true);
             logCompletion(ctx, tool, runCtx, ms, "error");
@@ -896,10 +896,10 @@ var plugin = definePlugin({
           }
           throw err;
         }
-        ctx.logger.info("cad:export: idempotency check", { repoPath });
+        ctx.logger.info("cad.export: idempotency check", { repoPath });
         const existing = await checkArtifactExists(pat, repoUrl, repoPath);
         if (existing) {
-          ctx.logger.info("cad:export: already exists", { repoPath, commitSha: existing.commitSha });
+          ctx.logger.info("cad.export: already exists", { repoPath, commitSha: existing.commitSha });
           const ms = Date.now() - t0;
           await emitMetrics(anyCtx, tool, ms, false);
           logCompletion(ctx, tool, runCtx, ms, "ok");
@@ -918,22 +918,22 @@ var plugin = definePlugin({
           logCompletion(ctx, tool, runCtx, ms, "error");
           return workerInternalError(msg);
         }
-        const commitMessage = `CAD artifact: ticket=${ticketIdStr} tool=cad:export call=${toolCallIdStr}`;
+        const commitMessage = `CAD artifact: ticket=${ticketIdStr} tool=cad.export call=${toolCallIdStr}`;
         const doPush = () => pushArtifactToGitHub(pat, repoUrl, branch, localFile, repoPath, commitMessage);
-        ctx.logger.info("cad:export: pushing", { repoPath, branch });
+        ctx.logger.info("cad.export: pushing", { repoPath, branch });
         try {
           let pushResult;
           try {
             pushResult = await doPush();
           } catch (firstErr) {
             if (firstErr instanceof PushError && firstErr.kind === "conflict") {
-              ctx.logger.warn("cad:export: conflict, retrying once", { repoPath });
+              ctx.logger.warn("cad.export: conflict, retrying once", { repoPath });
               pushResult = await doPush();
             } else {
               throw firstErr;
             }
           }
-          ctx.logger.info("cad:export: committed", { repoPath, commitSha: pushResult.commitSha });
+          ctx.logger.info("cad.export: committed", { repoPath, commitSha: pushResult.commitSha });
           const ms = Date.now() - t0;
           await emitMetrics(anyCtx, tool, ms, false);
           logCompletion(ctx, tool, runCtx, ms, "ok");
@@ -943,7 +943,7 @@ var plugin = definePlugin({
           };
         } catch (err) {
           if (err instanceof PushError) {
-            ctx.logger.warn("cad:export: push failed", { kind: err.kind, httpStatus: err.httpStatus });
+            ctx.logger.warn("cad.export: push failed", { kind: err.kind, httpStatus: err.httpStatus });
             const ms = Date.now() - t0;
             await emitMetrics(anyCtx, tool, ms, true);
             logCompletion(ctx, tool, runCtx, ms, "error");

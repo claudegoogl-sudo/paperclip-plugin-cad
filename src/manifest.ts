@@ -54,18 +54,18 @@ type ManifestWithRuntimeRequirements = PaperclipPluginManifestV1 & {
 const manifest: ManifestWithRuntimeRequirements = {
   id: "platform.cad",
   apiVersion: 1,
-  version: "0.1.1",
+  version: "0.1.2",
   displayName: "CAD (CadQuery)",
   description:
     "Lets agents design and export 3D CAD models via CadQuery tool calls. " +
-    "v0.1.0 surface: cad:run_script (execute Python → staged artifact) and " +
-    "cad:export (staged artifact → GitHub commit + permalink). " +
+    "v0.1.0 surface: cad.run_script (execute Python → staged artifact) and " +
+    "cad.export (staged artifact → GitHub commit + permalink). " +
     "Operator-confirmed via approval f420bc31.",
   author: "Platform",
   categories: ["connector"],
 
   // Capabilities (v0.1.0):
-  //   agent.tools.register — register cad:run_script and cad:export
+  //   agent.tools.register — register cad.run_script and cad.export
   //   http.outbound        — GitHub Contents API push (PLA-56)
   //   secrets.read-ref     — ctx.secrets.resolve for GitHub PAT (PLA-47)
   //   metrics.write        — ctx.metrics counters + duration histograms
@@ -135,12 +135,12 @@ const manifest: ManifestWithRuntimeRequirements = {
   // v0.1.0 tool surface — operator-confirmed via approval f420bc31 (2026-05-01).
   tools: [
     {
-      name: "cad:run_script",
+      name: "cad.run_script",
       displayName: "CAD Run Script",
       description:
         "Execute a CadQuery Python script string. " +
         "Returns { artifactId, summary }. The artifact is staged locally; " +
-        "use cad:export to commit it to the GitHub artifact repo.",
+        "use cad.export to commit it to the GitHub artifact repo.",
       parametersSchema: {
         type: "object",
         properties: {
@@ -163,7 +163,7 @@ const manifest: ManifestWithRuntimeRequirements = {
       },
     },
     {
-      name: "cad:export",
+      name: "cad.export",
       displayName: "CAD Export",
       description:
         "Export a previously staged CAD artifact to a specific file format and " +
@@ -176,7 +176,7 @@ const manifest: ManifestWithRuntimeRequirements = {
         properties: {
           artifactId: {
             type: "string",
-            description: "Artifact ID returned by cad:run_script.",
+            description: "Artifact ID returned by cad.run_script.",
           },
           format: {
             type: "string",
@@ -205,7 +205,7 @@ const manifest: ManifestWithRuntimeRequirements = {
           },
         },
         required: ["artifactId", "format", "paperclipTicketId", "toolCallId"],
-        // PLA-74 F3 — fail-closed on unknown fields; matches cad:run_script.
+        // PLA-74 F3 — fail-closed on unknown fields; matches cad.run_script.
         additionalProperties: false,
       },
     },

@@ -18,7 +18,7 @@
  *       socket.create_connection return structured script_error (not a
  *       successful HTTP response). Error message contains "network access blocked".
  *
- *  AC1  End-to-end: cad:run_script calls the real worker and returns { artifactId }.
+ *  AC1  End-to-end: cad.run_script calls the real worker and returns { artifactId }.
  *  AC8  Observability: the metrics ctx receives tool.calls / tool.duration_ms writes.
  *
  * AC5: Dependency pinning documented in worker/requirements-cad.txt.
@@ -798,11 +798,11 @@ describe("PLA-76 — sandbox hardening", () => {
 });
 
 // ---------------------------------------------------------------------------
-// AC1 + AC8: cad:run_script end-to-end via worker.ts (real subprocess)
+// AC1 + AC8: cad.run_script end-to-end via worker.ts (real subprocess)
 // ---------------------------------------------------------------------------
 
-describe("AC1+AC8 — cad:run_script end-to-end via worker.ts", () => {
-  it("cad:run_script executes real CadQuery and returns artifactId + metrics", async () => {
+describe("AC1+AC8 — cad.run_script end-to-end via worker.ts", () => {
+  it("cad.run_script executes real CadQuery and returns artifactId + metrics", async () => {
     vi.mock("@paperclipai/plugin-sdk", () => ({
       definePlugin: (config: unknown) => config,
       runWorker: vi.fn(),
@@ -834,7 +834,7 @@ describe("AC1+AC8 — cad:run_script end-to-end via worker.ts", () => {
     };
     await plugin.default?.setup?.(ctx);
 
-    const runScript = handlers["run_script"];
+    const runScript = handlers["cad.run_script"];
     expect(runScript).toBeDefined();
 
     const result = (await runScript({

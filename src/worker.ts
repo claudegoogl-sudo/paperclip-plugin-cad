@@ -2,8 +2,8 @@
  * CAD plugin worker — sub-goals 3 (PLA-55) + 5 (PLA-56)
  *
  * Tool surface (operator-confirmed via approval f420bc31):
- *   cad:run_script  — execute CadQuery Python → staged artifact
- *   cad:export      — staged artifact → GitHub commit + permalink
+ *   cad.run_script  — execute CadQuery Python → staged artifact
+ *   cad.export      — staged artifact → GitHub commit + permalink
  *
  * PLA-55 framework (AC2–AC6):
  *   - Input validation: structured validation_error (400) with no stack traces.
@@ -26,7 +26,7 @@
  *   F1 — Path-traversal allowlist on paperclipTicketId/toolCallId/filename,
  *        post-build path normalization assertion, per-segment URL encoding.
  *   F2 — Subsumed by F1 (allowlist excludes newlines + commit-message trailers).
- *   F3 — additionalProperties:false on instanceConfigSchema and cad:export schema.
+ *   F3 — additionalProperties:false on instanceConfigSchema and cad.export schema.
  *   F4 — Strict URL parsing for parseGitHubUrl with host === "github.com".
  *   F5 — AbortSignal.timeout(30_000) on every outbound fetch.
  */
@@ -56,7 +56,7 @@ const DEFAULT_ARTIFACT_REPO_URL =
 const DEFAULT_ARTIFACT_BRANCH = "main";
 
 // ---------------------------------------------------------------------------
-// Artifact staging map (cad:run_script → cad:export handoff)
+// Artifact staging map (cad.run_script → cad.export handoff)
 //
 // PLA-80 (F6): plugin workers are shared across all agents/companies on a host
 // (one worker per plugin per Paperclip instance — see plugin-worker-manager and
@@ -385,11 +385,15 @@ const plugin = definePlugin({
     const anyCtx = ctx as AnyCtx;
 
     // ------------------------------------------------------------------
-    // run_script (manifest tool name; host strips the platform.cad: namespace
-    // before RPC-dispatching to the worker — see plugin-cad#7 / PLA-354)
+    // cad.run_script (manifest tool name = "cad.run_script"; host parses the
+    // namespaced name `platform.cad:cad.run_script` via lastIndexOf(":") and
+    // RPC-dispatches the worker with bare key "cad.run_script". PLA-374
+    // switched the public tool surface from `cad:<verb>` (rejected by the
+    // tightened PLA-163 manifest validator — `:` is not allowed) to
+    // `cad.<verb>` and the register keys here must follow.)
     // ------------------------------------------------------------------
     ctx.tools.register(
-      "run_script",
+      "cad.run_script",
       {
         displayName: "CAD Run Script",
         description: "Execute a CadQuery Python script. Returns { artifactId, summary }.",
@@ -405,7 +409,7 @@ const plugin = definePlugin({
       },
       async (params, runCtxRaw?: unknown) => {
         const runCtx = (runCtxRaw as RunCtx | undefined) ?? {};
-        const tool = "cad:run_script";
+        const tool = "cad.run_script";
         const t0 = Date.now();
 
         if (typeof params !== "object" || params === null) {
@@ -439,21 +443,21 @@ const plugin = definePlugin({
         // artifact, since any later caller would match the un-scoped key.
         if (typeof runCtx.companyId !== "string" || runCtx.companyId.length === 0 ||
             typeof runCtx.agentId !== "string" || runCtx.agentId.length === 0) {
-          ctx.logger.warn("cad:run_script: missing tenant context on runCtx");
+          ctx.logger.warn("cad.run_script: missing tenant context on runCtx");
           const ms = Date.now() - t0;
           await emitMetrics(anyCtx, tool, ms, true);
           logCompletion(ctx, tool, runCtx, ms, "error");
           return validationError("missing tenant context (companyId/agentId) on runCtx");
         }
 
-        ctx.logger.info("cad:run_script: rendering", { scriptLength: script.length, timeoutSeconds });
+        ctx.logger.info("cad.run_script: rendering", { scriptLength: script.length, timeoutSeconds });
 
         let stepPath: string;
         try {
           stepPath = await renderCadScript(script, timeoutSeconds);
         } catch (err) {
           const msg = err instanceof Error ? err.message : "Unknown worker error";
-          ctx.logger.warn("cad:run_script: worker error", { error: msg });
+          ctx.logger.warn("cad.run_script: worker error", { error: msg });
           const ms = Date.now() - t0;
           await emitMetrics(anyCtx, tool, ms, true);
           logCompletion(ctx, tool, runCtx, ms, "error");
@@ -466,7 +470,7 @@ const plugin = definePlugin({
           stagingMapKey(runCtx.companyId, runCtx.agentId, artifactId),
           { script, stepPath },
         );
-        ctx.logger.info("cad:run_script: staged", { artifactId });
+        ctx.logger.info("cad.run_script: staged", { artifactId });
 
         const ms = Date.now() - t0;
         await emitMetrics(anyCtx, tool, ms, false);
@@ -480,11 +484,14 @@ const plugin = definePlugin({
     );
 
     // ------------------------------------------------------------------
-    // export  (PLA-55 tool surface + PLA-56 GitHub commit pipeline)
-    // Host strips the platform.cad: namespace — see plugin-cad#7 / PLA-354.
+    // cad.export  (PLA-55 tool surface + PLA-56 GitHub commit pipeline)
+    // Manifest tool name = "cad.export"; host parses
+    // `platform.cad:cad.export` via lastIndexOf(":") and dispatches the
+    // worker with bare key "cad.export". PLA-374 dot-rename — the colon
+    // form is rejected by the PLA-163 manifest validator.
     // ------------------------------------------------------------------
     ctx.tools.register(
-      "export",
+      "cad.export",
       {
         displayName: "CAD Export",
         description:
@@ -493,7 +500,7 @@ const plugin = definePlugin({
         parametersSchema: {
           type: "object",
           properties: {
-            artifactId: { type: "string", description: "Artifact ID from cad:run_script." },
+            artifactId: { type: "string", description: "Artifact ID from cad.run_script." },
             format: { type: "string", enum: ["step", "stl", "3mf"], description: "Output format." },
             paperclipTicketId: {
               type: "string",
@@ -517,7 +524,7 @@ const plugin = definePlugin({
       },
       async (params, runCtxRaw?: unknown) => {
         const runCtx = (runCtxRaw as RunCtx | undefined) ?? {};
-        const tool = "cad:export";
+        const tool = "cad.export";
         const t0 = Date.now();
 
         if (typeof params !== "object" || params === null) {
@@ -599,7 +606,7 @@ const plugin = definePlugin({
           }
         }
 
-        ctx.logger.info("cad:export: starting", { artifactId, format });
+        ctx.logger.info("cad.export: starting", { artifactId, format });
 
         // PLA-80 (F6): scoped lookup by (companyId, agentId, artifactId). If the
         // calling runCtx does not match the entry's caller, fall through to the
@@ -613,11 +620,11 @@ const plugin = definePlugin({
           ? artifactStagingMap.get(stagingMapKey(runCtx.companyId!, runCtx.agentId!, artifactId))
           : undefined;
         if (!stagingEntry) {
-          ctx.logger.warn("cad:export: unknown artifactId", { artifactId });
+          ctx.logger.warn("cad.export: unknown artifactId", { artifactId });
           const ms = Date.now() - t0;
           await emitMetrics(anyCtx, tool, ms, true);
           logCompletion(ctx, tool, runCtx, ms, "error");
-          return workerInternalError(`No staged artifact for artifactId: ${artifactId}. Call cad:run_script first.`);
+          return workerInternalError(`No staged artifact for artifactId: ${artifactId}. Call cad.run_script first.`);
         }
 
         // Local-file export path (no GitHub params — pre-PLA-56 compat / PLA-55 tests).
@@ -664,21 +671,21 @@ const plugin = definePlugin({
         // authoritative guard.
         const pathErr = assertSafeRepoPath(repoPath);
         if (pathErr) {
-          ctx.logger.warn("cad:export: repoPath assertion failed", { pathErr });
+          ctx.logger.warn("cad.export: repoPath assertion failed", { pathErr });
           const ms = Date.now() - t0;
           await emitMetrics(anyCtx, tool, ms, true);
           logCompletion(ctx, tool, runCtx, ms, "error");
           return validationError(pathErr);
         }
 
-        ctx.logger.info("cad:export: resolving GitHub PAT");
+        ctx.logger.info("cad.export: resolving GitHub PAT");
         const pat = await ctx.secrets.resolve(config.githubPatSecretId);
 
         try {
           await checkRepoPrerequisite(pat, repoUrl);
         } catch (err) {
           if (err instanceof PushError && err.kind === "prerequisite_missing") {
-            ctx.logger.warn("cad:export: prerequisite failed", { repoUrl, httpStatus: err.httpStatus });
+            ctx.logger.warn("cad.export: prerequisite failed", { repoUrl, httpStatus: err.httpStatus });
             const ms = Date.now() - t0;
             await emitMetrics(anyCtx, tool, ms, true);
             logCompletion(ctx, tool, runCtx, ms, "error");
@@ -687,10 +694,10 @@ const plugin = definePlugin({
           throw err;
         }
 
-        ctx.logger.info("cad:export: idempotency check", { repoPath });
+        ctx.logger.info("cad.export: idempotency check", { repoPath });
         const existing = await checkArtifactExists(pat, repoUrl, repoPath);
         if (existing) {
-          ctx.logger.info("cad:export: already exists", { repoPath, commitSha: existing.commitSha });
+          ctx.logger.info("cad.export: already exists", { repoPath, commitSha: existing.commitSha });
           const ms = Date.now() - t0;
           await emitMetrics(anyCtx, tool, ms, false);
           logCompletion(ctx, tool, runCtx, ms, "ok");
@@ -714,11 +721,11 @@ const plugin = definePlugin({
         // F2 — uses already-allowlisted strings; no newlines, no commit-message
         // trailers can land here because TICKET_ID_RE and TOOL_CALL_ID_RE
         // exclude every character that isn't alphanumeric / dash / underscore.
-        const commitMessage = `CAD artifact: ticket=${ticketIdStr} tool=cad:export call=${toolCallIdStr}`;
+        const commitMessage = `CAD artifact: ticket=${ticketIdStr} tool=cad.export call=${toolCallIdStr}`;
         const doPush = (): Promise<PushResult> =>
           pushArtifactToGitHub(pat, repoUrl, branch, localFile, repoPath, commitMessage);
 
-        ctx.logger.info("cad:export: pushing", { repoPath, branch });
+        ctx.logger.info("cad.export: pushing", { repoPath, branch });
 
         try {
           let pushResult: PushResult;
@@ -726,14 +733,14 @@ const plugin = definePlugin({
             pushResult = await doPush();
           } catch (firstErr) {
             if (firstErr instanceof PushError && firstErr.kind === "conflict") {
-              ctx.logger.warn("cad:export: conflict, retrying once", { repoPath });
+              ctx.logger.warn("cad.export: conflict, retrying once", { repoPath });
               pushResult = await doPush();
             } else {
               throw firstErr;
             }
           }
 
-          ctx.logger.info("cad:export: committed", { repoPath, commitSha: pushResult.commitSha });
+          ctx.logger.info("cad.export: committed", { repoPath, commitSha: pushResult.commitSha });
           const ms = Date.now() - t0;
           await emitMetrics(anyCtx, tool, ms, false);
           logCompletion(ctx, tool, runCtx, ms, "ok");
@@ -743,7 +750,7 @@ const plugin = definePlugin({
           };
         } catch (err) {
           if (err instanceof PushError) {
-            ctx.logger.warn("cad:export: push failed", { kind: err.kind, httpStatus: err.httpStatus });
+            ctx.logger.warn("cad.export: push failed", { kind: err.kind, httpStatus: err.httpStatus });
             const ms = Date.now() - t0;
             await emitMetrics(anyCtx, tool, ms, true);
             logCompletion(ctx, tool, runCtx, ms, "error");
