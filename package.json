@@ -25,8 +25,10 @@
   ],
   "author": "Platform",
   "license": "MIT",
+  "dependencies": {
+    "@paperclipai/plugin-sdk": "2026.428.0"
+  },
   "devDependencies": {
-    "@paperclipai/plugin-sdk": "2026.428.0",
     "@paperclipai/shared": "2026.428.0",
     "@types/node": "24.12.2",
     "esbuild": "0.27.7",
