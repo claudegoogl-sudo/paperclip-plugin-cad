@@ -2,13 +2,13 @@
 
 Adoption surface for agent authors. Covers tool invocation, schemas, error codes, and a worked example.
 
-Plugin: `platform.cad` · Version: `0.1.0` · Tracker: [PLA-32](/PLA/issues/PLA-32)
+Plugin: `platform.cad` · Version: `0.1.2` · Tracker: [PLA-32](/PLA/issues/PLA-32)
 
 ---
 
 ## Tools
 
-### `cad:run_script`
+### `cad.run_script`
 
 Execute a CadQuery Python script string in an isolated subprocess. Returns a staged artifact ID and a summary of the shape produced.
 
@@ -50,12 +50,12 @@ Execute a CadQuery Python script string in an isolated subprocess. Returns a sta
 
 | Field        | Type   | Description |
 |--------------|--------|-------------|
-| `artifactId` | string | Opaque ID for the staged artifact. Pass this to `cad:export`. |
+| `artifactId` | string | Opaque ID for the staged artifact. Pass this to `cad.export`. |
 | `summary`    | string | Human-readable description of the shape produced. |
 
 ---
 
-### `cad:export`
+### `cad.export`
 
 Export a previously staged CAD artifact to a specific file format and commit it to the configured GitHub artifact repository. Artifact path is deterministic: `artifacts/{paperclipTicketId}/{toolCallId}/{filename}`. Idempotent: re-calling with the same `toolCallId` returns the existing commit info.
 
@@ -63,7 +63,7 @@ Export a previously staged CAD artifact to a specific file format and commit it 
 
 | Field               | Type   | Required | Description |
 |---------------------|--------|----------|-------------|
-| `artifactId`        | string | yes      | Artifact ID returned by `cad:run_script`. |
+| `artifactId`        | string | yes      | Artifact ID returned by `cad.run_script`. |
 | `format`            | string | yes      | Output file format: `"step"`, `"stl"`, or `"3mf"`. |
 | `paperclipTicketId` | string | yes      | Paperclip ticket ID (e.g. `PLA-56`). Used in artifact path and commit message. |
 | `toolCallId`        | string | yes      | Unique ID for this tool call. Used for deterministic artifact path and idempotency. |
@@ -75,7 +75,7 @@ Export a previously staged CAD artifact to a specific file format and commit it 
   "properties": {
     "artifactId": {
       "type": "string",
-      "description": "Artifact ID returned by cad:run_script."
+      "description": "Artifact ID returned by cad.run_script."
     },
     "format": {
       "type": "string",
@@ -115,7 +115,7 @@ Export a previously staged CAD artifact to a specific file format and commit it 
 | `permalink`    | string | GitHub permalink (blob URL pinned to `commitSha`) for the artifact. |
 | `artifactPath` | string | Path within the artifact repository: `artifacts/{paperclipTicketId}/{toolCallId}/{filename}`. |
 
-> **Note:** When the worker runs without tenant context (test/local fallback at `worker.ts:451`), `cad:export` returns `{ filePath, ... }` instead. Production agent calls always go down the GitHub-commit path above.
+> **Note:** When the worker runs without tenant context (test/local fallback at `worker.ts:451`), `cad.export` returns `{ filePath, ... }` instead. Production agent calls always go down the GitHub-commit path above.
 
 ---
 
@@ -123,10 +123,10 @@ Export a previously staged CAD artifact to a specific file format and commit it 
 
 | Error condition | Behaviour |
 |-----------------|-----------|
-| `script` missing or empty | `cad:run_script` returns a validation error before execution. |
+| `script` missing or empty | `cad.run_script` returns a validation error before execution. |
 | `timeout` out of range (< 1 or > 300) | Schema validation rejects the call. |
-| CadQuery script raises an exception | `cad:run_script` surfaces the Python traceback in the error message. |
-| Unknown `artifactId` passed to `cad:export` | `cad:export` returns an error indicating the artifact was not found. |
+| CadQuery script raises an exception | `cad.run_script` surfaces the Python traceback in the error message. |
+| Unknown `artifactId` passed to `cad.export` | `cad.export` returns an error indicating the artifact was not found. |
 | Unsupported `format` value | Schema validation rejects the call (enum constraint). |
 
 ---
@@ -137,7 +137,7 @@ Design a simple bracket and export it as STEP:
 
 ```
 # Step 1 — run the script
-Tool call: cad:run_script
+Tool call: cad.run_script
 {
   "script": "import cadquery as cq\nresult = (cq.Workplane('XY')\n    .box(40, 20, 5)\n    .faces('>Z').workplane()\n    .hole(4))",
   "timeout": 30
@@ -145,7 +145,7 @@ Tool call: cad:run_script
 → { "artifactId": "cad-artifact-a1b2c3d4", "summary": "Box 40×20×5 mm with Ø4 hole" }
 
 # Step 2 — export to STEP and commit to GitHub
-Tool call: cad:export
+Tool call: cad.export
 {
   "artifactId": "cad-artifact-a1b2c3d4",
   "format": "step",

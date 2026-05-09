@@ -1,16 +1,16 @@
 // src/manifest.ts
-var SECCOMP_FILTER_SHA256_PIN = "6bdbbc4fdfb3d80996c66a812df450c95043a86364fe8955651ec867859617ba";
+var SECCOMP_FILTER_SHA256_PIN = "__PLA114_SECCOMP_FILTER_SHA256__";
 var SECCOMP_LOADER_SHA256_PIN = "0fc1b58d38895fb2dc7be1464b1230344530aa7f168af9478fa47153e20f8be0";
 var manifest = {
   id: "platform.cad",
   apiVersion: 1,
-  version: "0.1.1",
+  version: "0.1.2",
   displayName: "CAD (CadQuery)",
-  description: "Lets agents design and export 3D CAD models via CadQuery tool calls. v0.1.0 surface: cad:run_script (execute Python \u2192 staged artifact) and cad:export (staged artifact \u2192 GitHub commit + permalink). Operator-confirmed via approval f420bc31.",
+  description: "Lets agents design and export 3D CAD models via CadQuery tool calls. v0.1.0 surface: cad.run_script (execute Python \u2192 staged artifact) and cad.export (staged artifact \u2192 GitHub commit + permalink). Operator-confirmed via approval f420bc31.",
   author: "Platform",
   categories: ["connector"],
   // Capabilities (v0.1.0):
-  //   agent.tools.register — register cad:run_script and cad:export
+  //   agent.tools.register — register cad.run_script and cad.export
   //   http.outbound        — GitHub Contents API push (PLA-56)
   //   secrets.read-ref     — ctx.secrets.resolve for GitHub PAT (PLA-47)
   //   metrics.write        — ctx.metrics counters + duration histograms
@@ -39,7 +39,7 @@ var manifest = {
   // the filter blob unchanged.
   worker: {
     seccompFilterPath: "./worker/seccomp_filter.bpf",
-    seccompFilterSha256: "6bdbbc4fdfb3d80996c66a812df450c95043a86364fe8955651ec867859617ba",
+    seccompFilterSha256: "__PLA114_SECCOMP_FILTER_SHA256__",
     seccompLoaderPath: "./worker/seccomp_load.py",
     seccompLoaderSha256: "0fc1b58d38895fb2dc7be1464b1230344530aa7f168af9478fa47153e20f8be0"
   },
@@ -70,9 +70,9 @@ var manifest = {
   // v0.1.0 tool surface — operator-confirmed via approval f420bc31 (2026-05-01).
   tools: [
     {
-      name: "cad:run_script",
+      name: "cad.run_script",
       displayName: "CAD Run Script",
-      description: "Execute a CadQuery Python script string. Returns { artifactId, summary }. The artifact is staged locally; use cad:export to commit it to the GitHub artifact repo.",
+      description: "Execute a CadQuery Python script string. Returns { artifactId, summary }. The artifact is staged locally; use cad.export to commit it to the GitHub artifact repo.",
       parametersSchema: {
         type: "object",
         properties: {
@@ -92,7 +92,7 @@ var manifest = {
       }
     },
     {
-      name: "cad:export",
+      name: "cad.export",
       displayName: "CAD Export",
       description: "Export a previously staged CAD artifact to a specific file format and commit it to the configured GitHub artifact repository. Artifact path is deterministic: artifacts/{paperclipTicketId}/{toolCallId}/{filename}. Idempotent: re-calling with the same toolCallId returns the existing commit info. Returns { commitSha, permalink, artifactPath } on success.",
       parametersSchema: {
@@ -100,7 +100,7 @@ var manifest = {
         properties: {
           artifactId: {
             type: "string",
-            description: "Artifact ID returned by cad:run_script."
+            description: "Artifact ID returned by cad.run_script."
           },
           format: {
             type: "string",
@@ -126,7 +126,7 @@ var manifest = {
           }
         },
         required: ["artifactId", "format", "paperclipTicketId", "toolCallId"],
-        // PLA-74 F3 — fail-closed on unknown fields; matches cad:run_script.
+        // PLA-74 F3 — fail-closed on unknown fields; matches cad.run_script.
         additionalProperties: false
       }
     }
