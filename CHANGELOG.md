@@ -21,6 +21,18 @@ Tracker: [PLA-32](/PLA/issues/PLA-32)
   RPC-dispatches the worker with bare key `cad.run_script`
   (see `plugin-tool-registry.ts:247`). ([PLA-374](/PLA/issues/PLA-374),
   unblocks [PLA-368](/PLA/issues/PLA-368))
+- **fix(packaging): declare `@paperclipai/plugin-sdk` under `dependencies` so
+  local-path installs resolve at runtime.** The host's local-path install
+  code path (`server/src/services/plugin-loader.ts:229`) deliberately does
+  not run `npm install`; the worker is `fork()`ed from `dist/worker.js`,
+  which `import`s `@paperclipai/plugin-sdk` at runtime. With the SDK only
+  in `devDependencies`, the extracted release tarball had no path for
+  `node_modules/@paperclipai/plugin-sdk`, so worker boot failed with
+  `ERR_MODULE_NOT_FOUND`. Moving the SDK to `dependencies` (version pin
+  unchanged at `2026.428.0`) means `npm install --omit=dev` inside the
+  extracted tarball materialises the SDK tree before the host fork()s the
+  worker. The release-install SOP shell block is updated to include the
+  `npm install --omit=dev` step. ([PLA-374](/PLA/issues/PLA-374))
 
 ### Notes
 
