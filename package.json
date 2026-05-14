@@ -1,6 +1,6 @@
 {
   "name": "@platform/paperclip-plugin-cad",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "type": "module",
   "private": true,
   "description": "CadQuery plugin for Paperclip — lets agents design and render 3D CAD models via tool calls",
@@ -10,8 +10,36 @@
     "test": "vitest run --config ./vitest.config.ts",
     "typecheck": "tsc --noEmit",
     "validate:manifest": "node ./scripts/validate-manifest.mjs",
-    "prepack": "npm run build && npm run validate:manifest"
+    "prepack": "make -C worker && npm run build && npm run validate:manifest"
   },
+  "files": [
+    "dist/",
+    "src/cad_worker.py",
+    "src/manifest.ts",
+    "src/cad-worker-client.ts",
+    "src/stub-cad-worker.ts",
+    "src/worker.ts",
+    "worker/Makefile",
+    "worker/cad_preexec",
+    "worker/cad_preexec.c",
+    "worker/measure-clone-fallback.sh",
+    "worker/requirements-cad.txt",
+    "worker/seccomp-evidence.md",
+    "worker/seccomp_filter.bpf",
+    "worker/seccomp_filter.bpf.sha256",
+    "worker/seccomp_filter.c",
+    "worker/seccomp_filter_compile",
+    "worker/seccomp_load.py",
+    "scripts/validate-manifest.mjs",
+    "esbuild.config.mjs",
+    "tsconfig.json",
+    "vitest.config.ts",
+    "SKILL.md",
+    "SECURITY.md",
+    "CHANGELOG.md",
+    "README.md",
+    "LICENSE"
+  ],
   "paperclipPlugin": {
     "manifest": "./dist/manifest.js",
     "worker": "./dist/worker.js"

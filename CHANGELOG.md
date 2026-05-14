@@ -4,6 +4,39 @@ Tracker: [PLA-32](/PLA/issues/PLA-32)
 
 ---
 
+## v0.1.5 — 2026-05-14
+
+### Fixed
+
+- **Ship `worker/seccomp_filter.bpf` and `worker/cad_preexec` in the npm
+  tarball.** Both are compiled build artifacts (`.gitignore`d). Without an
+  explicit `files` allowlist in `package.json`, `npm pack` excludes
+  gitignored entries — so v0.1.0 through v0.1.4 shipped without them. Plugin
+  runtime resolves the bpf via `join(__dirname, "..", "worker",
+  "seccomp_filter.bpf")` from the install `packagePath`, so a missing bpf
+  hard-500s every `cad.run_script` dispatch with
+  `Option B sandbox unavailable: seccomp filter blob not found at
+  <packagePath>/worker/seccomp_filter.bpf`. Surfaced by Deepest Resonance on
+  DPR-53 / [PLA-443](/PLA/issues/PLA-443) on 2026-05-14.
+
+### Changed
+
+- `package.json` now carries an explicit `files` allowlist enumerating
+  everything that ships. Future build-artifact additions must be added here
+  or they will silently drop from the tarball.
+- `prepack` script now runs `make -C worker` before `npm run build`, so the
+  bpf is always rebuilt at release time. Requires `libseccomp-dev` on the
+  release host (already present on the platform release runner).
+
+### Verification
+
+- `tar tzf platform-paperclip-plugin-cad-0.1.5.tgz | grep -F
+  worker/seccomp_filter.bpf` matches.
+- Post-install smoke: `cad.run_script` with
+  `result = cq.Workplane('XY').rect(40, 20)` returns 200 with artifactId.
+
+---
+
 ## v0.1.4 — 2026-05-14
 
 ### Fixed
