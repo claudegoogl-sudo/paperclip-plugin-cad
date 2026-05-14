@@ -4,6 +4,52 @@ Tracker: [PLA-32](/PLA/issues/PLA-32)
 
 ---
 
+## v0.1.6 — 2026-05-14
+
+### Fixed
+
+- **Ship `dist/cad_worker.py` in the npm tarball.** The bundled node worker
+  resolves its python sibling via `join(__dirname, "cad_worker.py")` at
+  runtime (see `src/cad-worker-client.ts:107`), so the host bwraps
+  `<extracted>/package/dist/cad_worker.py` per dispatch. v0.1.5 only shipped
+  `src/cad_worker.py`; the build step never copied it into `dist/`, so every
+  `cad.run_script` dispatch died with `bwrap: Can't find source path
+  /tmp/pla-443-extract-0.1.5/package/dist/cad_worker.py`. Same release-asset
+  gap class as v0.1.5's seccomp_filter.bpf. Surfaced by DR on
+  DPR-53 / [PLA-443](/PLA/issues/PLA-443) / [PLA-447](/PLA/issues/PLA-447).
+
+### Changed
+
+- `esbuild.config.mjs` now copies `src/cad_worker.py` →
+  `dist/cad_worker.py` as its final step. Build refuses to produce a
+  tarball if the source python is missing.
+- New `scripts/check-release-tarball.mjs` smoke-check asserts every entry
+  in `REQUIRED_RUNTIME_ASSETS` (currently `dist/manifest.js`,
+  `dist/worker.js`, `dist/cad_worker.py`, `worker/seccomp_filter.bpf`,
+  `worker/seccomp_load.py`, `worker/cad_preexec`) is present inside the
+  packed tarball before release. Generalises the v0.1.5/v0.1.6 fix class
+  so a missing runtime blob fails CI instead of the operator's host.
+- `package.json` adds `check:release-tarball` (runs `npm pack` + asserts
+  required blobs) and `check:release-tarball:self-test` (drives the
+  gate's pass and fail paths against a synthetic file list — proves the
+  gate fires when an asset is missing without needing to mutate
+  `package.json` by hand).
+
+### Verification
+
+- `tar tzf platform-paperclip-plugin-cad-0.1.6.tgz | grep -E
+  '(seccomp_filter\.bpf|cad_worker\.py)'` returns both lines.
+- `npm run check:release-tarball` succeeds against the v0.1.6 tarball
+  and lists all six required blobs.
+- `npm run check:release-tarball:self-test` passes — gate accepts the
+  complete required set and rejects a synthetic broken list that omits
+  `dist/cad_worker.py`.
+- Post-install smoke (on board's Dispenser host): `cad.run_script` with
+  `cq.Workplane('XY').rect(40, 20)` + `cad.export format=dxf` returns
+  200 with artifactId, closing DPR-53.
+
+---
+
 ## v0.1.5 — 2026-05-14
 
 ### Fixed
