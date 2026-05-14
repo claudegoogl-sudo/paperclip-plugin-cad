@@ -1,6 +1,6 @@
 {
   "name": "@platform/paperclip-plugin-cad",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "type": "module",
   "private": true,
   "description": "CadQuery plugin for Paperclip — lets agents design and render 3D CAD models via tool calls",
@@ -10,6 +10,8 @@
     "test": "vitest run --config ./vitest.config.ts",
     "typecheck": "tsc --noEmit",
     "validate:manifest": "node ./scripts/validate-manifest.mjs",
+    "check:release-tarball": "node ./scripts/check-release-tarball.mjs --keep",
+    "check:release-tarball:self-test": "node ./scripts/check-release-tarball.mjs --self-test",
     "prepack": "make -C worker && npm run build && npm run validate:manifest"
   },
   "files": [
@@ -31,6 +33,7 @@
     "worker/seccomp_filter_compile",
     "worker/seccomp_load.py",
     "scripts/validate-manifest.mjs",
+    "scripts/check-release-tarball.mjs",
     "esbuild.config.mjs",
     "tsconfig.json",
     "vitest.config.ts",

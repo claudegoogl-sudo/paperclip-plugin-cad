@@ -2,8 +2,12 @@
  * esbuild configuration for the CAD plugin.
  *
  * Produces:
- *   dist/manifest.js   — plugin manifest (re-exported as default)
- *   dist/worker.js     — plugin worker entry point
+ *   dist/manifest.js     — plugin manifest (re-exported as default)
+ *   dist/worker.js       — plugin worker entry point
+ *   dist/cad_worker.py   — copied from src/ so the bundled worker
+ *                          (running from dist/) can resolve it via
+ *                          `join(__dirname, "cad_worker.py")` after
+ *                          npm extracts the tarball (PLA-447).
  *
  * PLA-114: at build time, this script substitutes the sha256 of
  * `worker/seccomp_filter.bpf` AND `worker/seccomp_load.py` into the
@@ -15,7 +19,13 @@
  */
 
 import * as esbuild from "esbuild";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { createHash } from "node:crypto";
 
 const watch = process.argv.includes("--watch");
@@ -132,6 +142,24 @@ async function build() {
         writeFileSync(target, src);
       }
     }
+
+    // PLA-447: copy the python worker source into dist/ so the bundled
+    // node worker (running from dist/worker.js) can resolve it via
+    // `join(__dirname, "cad_worker.py")` after npm extracts the tarball.
+    // The runtime contract (src/cad-worker-client.ts:107) expects this
+    // file adjacent to worker.js; without the copy step the published
+    // tarball ships src/cad_worker.py only and the host's bwrap spawn
+    // fails with `Can't find source path .../package/dist/cad_worker.py`.
+    const WORKER_PY_SRC = "src/cad_worker.py";
+    const WORKER_PY_DST = "dist/cad_worker.py";
+    if (!existsSync(WORKER_PY_SRC)) {
+      throw new Error(
+        `[build] ${WORKER_PY_SRC} missing — refusing to produce a tarball ` +
+          `that would 500 at first dispatch. See PLA-447.`,
+      );
+    }
+    copyFileSync(WORKER_PY_SRC, WORKER_PY_DST);
+    console.log(`[build] copied ${WORKER_PY_SRC} → ${WORKER_PY_DST}`);
 
     console.log("Build complete.");
   }
