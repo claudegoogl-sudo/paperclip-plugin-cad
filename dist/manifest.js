@@ -104,7 +104,10 @@ var manifest = {
           },
           format: {
             type: "string",
-            enum: ["step", "stl", "3mf"],
+            // PLA-443 — DR laser-fab ask: dxf/svg are 2D vector outputs.
+            // DXF requires the script's `result` be a 2D Workplane (wires/faces);
+            // SVG works for both 2D Workplanes and 3D shapes (projected view).
+            enum: ["step", "stl", "3mf", "dxf", "svg"],
             description: "Output file format."
           },
           paperclipTicketId: {

@@ -1,6 +1,6 @@
 {
   "name": "@platform/paperclip-plugin-cad",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "type": "module",
   "private": true,
   "description": "CadQuery plugin for Paperclip — lets agents design and render 3D CAD models via tool calls",

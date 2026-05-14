@@ -744,7 +744,13 @@ def _run_script(script: str, fmt: str, workdir: str) -> dict:
         }
 
     # Map format to canonical file extension.
-    ext_map = {"step": "step", "stl": "stl", "3mf": "3mf"}
+    # PLA-443 — dxf/svg are 2D vector formats (DR laser-fab ask). DXF requires
+    # the user script's `result` be a 2D-projectable Workplane (wires/faces);
+    # SVG accepts 2D Workplanes and 3D shapes (projected view). Both are
+    # routed through cq.exporters with the matching ExportTypes enum value;
+    # any 2D-shape requirement violation surfaces as a script_error traceback
+    # via the existing except block below.
+    ext_map = {"step": "step", "stl": "stl", "3mf": "3mf", "dxf": "dxf", "svg": "svg"}
     ext = ext_map.get(fmt, "step")
     artifact_path = os.path.join(workdir, f"artifact.{ext}")
 
@@ -754,6 +760,8 @@ def _run_script(script: str, fmt: str, workdir: str) -> dict:
             "stl":   cq.exporters.ExportTypes.STL,
             "3mf":   cq.exporters.ExportTypes.THREEMF,
             "step":  cq.exporters.ExportTypes.STEP,
+            "dxf":   cq.exporters.ExportTypes.DXF,
+            "svg":   cq.exporters.ExportTypes.SVG,
         }
         export_type = export_type_map.get(fmt, cq.exporters.ExportTypes.STEP)
         cq.exporters.export(cq_result, artifact_path, export_type)

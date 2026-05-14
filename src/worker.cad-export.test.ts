@@ -582,6 +582,78 @@ describe("cad.export PLA-74 F1/F2 — input allowlist (path-traversal + commit-i
 });
 
 // ---------------------------------------------------------------------------
+// PLA-443 — dxf / svg 2D vector formats
+//
+// Cross-company ask via DR (DPR-34). Verifies:
+//   - Enum accepts "dxf" and "svg" (no validation_error from worker.ts:543).
+//   - Worker routes through the same GitHub-commit pipeline as 3D formats.
+//   - Default filename uses the new extension (artifact.dxf / artifact.svg).
+//   - artifactPath is artifacts/{ticket}/{call}/artifact.<format>.
+// ---------------------------------------------------------------------------
+
+describe("cad.export PLA-443 — dxf / svg 2D vector formats", () => {
+  it("accepts format='dxf' and commits artifact.dxf via the same pipeline", async () => {
+    const artifactId = await stageArtifact();
+    const fetchMock = vi.mocked(globalThis.fetch);
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce(ok200());     // prereq
+    fetchMock.mockResolvedValueOnce(notFound());  // idempotency
+    fetchMock.mockResolvedValueOnce(notFound());  // push GET
+    fetchMock.mockResolvedValueOnce(putOk("dxfsha"));
+
+    const result = (await exportArtifact({
+      ...BASE_PARAMS,
+      artifactId,
+      format: "dxf",
+    })) as { data?: { artifactPath?: string; commitSha?: string; error?: string } };
+    expect(result.data?.error).toBeUndefined();
+    expect(result.data?.commitSha).toBe("dxfsha");
+    expect(result.data?.artifactPath).toBe("artifacts/PLA-56/call-001/artifact.dxf");
+
+    const putCall = fetchMock.mock.calls.find((c) => (c[1] as RequestInit | undefined)?.method === "PUT");
+    const putUrl = typeof putCall![0] === "string" ? putCall![0] : (putCall![0] as Request).url;
+    expect(putUrl).toContain("/contents/artifacts/PLA-56/call-001/artifact.dxf");
+  });
+
+  it("accepts format='svg' and commits artifact.svg via the same pipeline", async () => {
+    const artifactId = await stageArtifact();
+    const fetchMock = vi.mocked(globalThis.fetch);
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce(ok200());
+    fetchMock.mockResolvedValueOnce(notFound());
+    fetchMock.mockResolvedValueOnce(notFound());
+    fetchMock.mockResolvedValueOnce(putOk("svgsha"));
+
+    const result = (await exportArtifact({
+      ...BASE_PARAMS,
+      artifactId,
+      format: "svg",
+    })) as { data?: { artifactPath?: string; commitSha?: string; error?: string } };
+    expect(result.data?.error).toBeUndefined();
+    expect(result.data?.commitSha).toBe("svgsha");
+    expect(result.data?.artifactPath).toBe("artifacts/PLA-56/call-001/artifact.svg");
+  });
+
+  it("rejects an unknown 2D-ish format ('eps') with validation_error", async () => {
+    const artifactId = await stageArtifact();
+    const fetchMock = vi.mocked(globalThis.fetch);
+    fetchMock.mockReset();
+
+    const result = (await exportArtifact({
+      ...BASE_PARAMS,
+      artifactId,
+      format: "eps" as unknown as "step",
+    })) as { error?: string; data?: { code?: string; message?: string } };
+    expect(result.error).toBe("validation_error");
+    expect(result.data?.message).toMatch(/format must be one of/);
+    // Message lists the full enum incl. the new dxf/svg entries.
+    expect(result.data?.message).toMatch(/dxf/);
+    expect(result.data?.message).toMatch(/svg/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // PLA-74 F4 — strict URL parsing for parseGitHubUrl
 // ---------------------------------------------------------------------------
 
