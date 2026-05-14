@@ -13,7 +13,7 @@ import { execSync } from "node:child_process";
 import { createHash } from "node:crypto";
 
 // src/manifest.ts
-var SECCOMP_FILTER_SHA256_PIN = "__PLA114_SECCOMP_FILTER_SHA256__";
+var SECCOMP_FILTER_SHA256_PIN = "6bdbbc4fdfb3d80996c66a812df450c95043a86364fe8955651ec867859617ba";
 var SECCOMP_LOADER_SHA256_PIN = "0fc1b58d38895fb2dc7be1464b1230344530aa7f168af9478fa47153e20f8be0";
 
 // src/stub-cad-worker.ts

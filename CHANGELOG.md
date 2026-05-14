@@ -4,6 +4,27 @@ Tracker: [PLA-32](/PLA/issues/PLA-32)
 
 ---
 
+## v0.1.4 — 2026-05-14
+
+### Fixed
+
+- **Manifest version literal now matches `package.json`.** v0.1.3 shipped with
+  `package.json.version = "0.1.3"` but `src/manifest.ts` still hardcoded
+  `version: "0.1.2"`. Tarball filename, git tag, and GitHub release all read
+  v0.1.3 correctly; but the host registers the plugin row using
+  `manifest.version`, so `paperclipai plugin inspect` reported `version=0.1.2`
+  even after a successful install of the v0.1.3 tarball. The new enum
+  (`dxf` / `svg`) loaded and functioned correctly throughout — this was a
+  label-drift bug only, not a functional regression. ([PLA-443](/PLA/issues/PLA-443))
+
+### Added
+
+- Regression test (`src/manifest.version-parity.test.ts`) asserts
+  `manifest.version === packageJson.version` at every build. Prevents this
+  drift class from recurring.
+
+---
+
 ## v0.1.3 — 2026-05-14
 
 ### Added
