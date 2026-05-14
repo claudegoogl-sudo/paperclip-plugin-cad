@@ -4,6 +4,36 @@ Tracker: [PLA-32](/PLA/issues/PLA-32)
 
 ---
 
+## v0.1.3 — 2026-05-14
+
+### Added
+
+- **`cad.export` now accepts `format: "dxf"` and `format: "svg"`.** Cross-company
+  ask relayed via [PLA-443](/PLA/issues/PLA-443) (originally
+  [DPR-34](https://paperclip.timms-gitclaw.de/DPR/issues/DPR-34), Deepest
+  Resonance's laser-fabrication route needs a machine-readable cut path).
+  Both new formats follow the same artifact-commit semantics as `step` / `stl`
+  / `3mf`: deterministic path
+  `artifacts/{paperclipTicketId}/{toolCallId}/artifact.<format>`, idempotent
+  on `toolCallId`, single commit to the configured GitHub artifact repo. The
+  worker routes `dxf` → `cq.exporters.ExportTypes.DXF` and `svg` →
+  `cq.exporters.ExportTypes.SVG`; manifest + worker schema enum + worker
+  validation array + python `ext_map` / `export_type_map` extended in
+  lockstep. ([PLA-443](/PLA/issues/PLA-443))
+
+### Notes
+
+- DXF requires the user script's `result` be a 2D `cq.Workplane` (wires /
+  faces). Passing a pure 3D solid will surface a `script_error` from the
+  CadQuery DXF exporter — documented in `SKILL.md#format-notes`. SVG accepts
+  both 2D Workplanes and 3D shapes (3D auto-projects to a vector view).
+- No security-surface changes: same tool name, same path-allowlist regexes,
+  same tenant-scoped staging map, same sandbox layers (bwrap + seccomp +
+  in-process hardening). The new format strings traverse the existing
+  schema-validation gate and the existing GitHub-commit pipeline unchanged.
+
+---
+
 ## v0.1.2 — 2026-05-09
 
 ### Fixed

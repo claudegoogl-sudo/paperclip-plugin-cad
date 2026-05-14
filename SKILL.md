@@ -2,7 +2,7 @@
 
 Adoption surface for agent authors. Covers tool invocation, schemas, error codes, and a worked example.
 
-Plugin: `platform.cad` · Version: `0.1.2` · Tracker: [PLA-32](/PLA/issues/PLA-32)
+Plugin: `platform.cad` · Version: `0.1.3` · Tracker: [PLA-32](/PLA/issues/PLA-32)
 
 ---
 
@@ -64,7 +64,7 @@ Export a previously staged CAD artifact to a specific file format and commit it 
 | Field               | Type   | Required | Description |
 |---------------------|--------|----------|-------------|
 | `artifactId`        | string | yes      | Artifact ID returned by `cad.run_script`. |
-| `format`            | string | yes      | Output file format: `"step"`, `"stl"`, or `"3mf"`. |
+| `format`            | string | yes      | Output file format: `"step"`, `"stl"`, `"3mf"`, `"dxf"`, or `"svg"`. See [Format notes](#format-notes) below for the 2D-vector caveats on `dxf` / `svg`. |
 | `paperclipTicketId` | string | yes      | Paperclip ticket ID (e.g. `PLA-56`). Used in artifact path and commit message. |
 | `toolCallId`        | string | yes      | Unique ID for this tool call. Used for deterministic artifact path and idempotency. |
 | `filename`          | string | no       | Optional artifact filename. Defaults to `artifact.<format>`. |
@@ -79,7 +79,7 @@ Export a previously staged CAD artifact to a specific file format and commit it 
     },
     "format": {
       "type": "string",
-      "enum": ["step", "stl", "3mf"],
+      "enum": ["step", "stl", "3mf", "dxf", "svg"],
       "description": "Output file format."
     },
     "paperclipTicketId": {
@@ -119,6 +119,20 @@ Export a previously staged CAD artifact to a specific file format and commit it 
 
 ---
 
+## Format notes
+
+| Format | Dimensionality | Required shape | Notes |
+|--------|----------------|----------------|-------|
+| `step` | 3D (B-Rep) | Any CadQuery solid / compound | Canonical interchange; first-class output. |
+| `stl`  | 3D (mesh)  | Any CadQuery solid / compound | Triangulated mesh; used for 3D printing slicers. |
+| `3mf`  | 3D (mesh)  | Any CadQuery solid / compound | Modern mesh with material/color metadata. |
+| `dxf`  | **2D vector** | A 2D `cq.Workplane` (wires / faces) | For laser/plasma/router cut paths. Passing a pure 3D solid surfaces a `script_error` from CadQuery's `ExportTypes.DXF` exporter — script must produce a 2D profile (`Workplane.sketch().…`, `Workplane.section()`, or a planar face). |
+| `svg`  | 2D vector  | 2D `cq.Workplane`, **or** any 3D shape (auto-projected isometric view) | For drawing/doc artifacts and laser cut paths. 3D shapes render as a projected vector view; 2D Workplanes render in true outline. |
+
+The new `dxf` / `svg` formats (added in v0.1.3, [PLA-443](/PLA/issues/PLA-443)) follow the same artifact-commit semantics as `step` / `stl` / `3mf`: deterministic path `artifacts/{paperclipTicketId}/{toolCallId}/artifact.<format>`, idempotent on `toolCallId`, single commit to the configured GitHub artifact repo.
+
+---
+
 ## Error codes
 
 | Error condition | Behaviour |
@@ -128,6 +142,7 @@ Export a previously staged CAD artifact to a specific file format and commit it 
 | CadQuery script raises an exception | `cad.run_script` surfaces the Python traceback in the error message. |
 | Unknown `artifactId` passed to `cad.export` | `cad.export` returns an error indicating the artifact was not found. |
 | Unsupported `format` value | Schema validation rejects the call (enum constraint). |
+| `format: "dxf"` with a 3D-only shape | `cad.export` surfaces a `worker_internal` whose message wraps the CadQuery DXF exporter's traceback. The script must produce a 2D `Workplane` (wires / faces) for DXF. SVG accepts both 2D and 3D inputs. |
 
 ---
 

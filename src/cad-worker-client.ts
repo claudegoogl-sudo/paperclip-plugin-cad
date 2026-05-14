@@ -835,7 +835,7 @@ export async function invokeWorker(
 
 export async function renderCadQuery(
   script: string,
-  format: "step" | "stl" | "3mf",
+  format: ExportFormat,
   timeoutSeconds: number = DEFAULT_TIMEOUT_SECONDS,
   decision: SpawnModeDecision = selectSpawnMode(),
 ): Promise<WorkerResult> {

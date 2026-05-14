@@ -368,7 +368,10 @@ async function renderCadScript(script: string, timeoutSeconds = WORKER_DEFAULT_T
   return result.artifactPath;
 }
 
-async function exportToFormat(entry: StagingEntry, format: "step" | "stl" | "3mf"): Promise<string> {
+async function exportToFormat(
+  entry: StagingEntry,
+  format: "step" | "stl" | "3mf" | "dxf" | "svg",
+): Promise<string> {
   if (format === "step") return entry.stepPath;
   const result = await renderCadQuery(entry.script, format, WORKER_DEFAULT_TIMEOUT);
   if (!result.ok) throw new Error(`[${result.error}] Export to ${format} failed: ${result.message}`);
@@ -501,7 +504,14 @@ const plugin = definePlugin({
           type: "object",
           properties: {
             artifactId: { type: "string", description: "Artifact ID from cad.run_script." },
-            format: { type: "string", enum: ["step", "stl", "3mf"], description: "Output format." },
+            format: {
+              type: "string",
+              // PLA-443 — keep enum in lockstep with manifest.ts; DR laser-fab
+              // ask added 2D vector outputs (dxf, svg) routed to CadQuery's
+              // ExportTypes.DXF / ExportTypes.SVG in cad_worker.py.
+              enum: ["step", "stl", "3mf", "dxf", "svg"],
+              description: "Output format.",
+            },
             paperclipTicketId: {
               type: "string",
               pattern: "^[A-Z][A-Z0-9]{1,9}-[0-9]{1,9}$",
@@ -540,7 +550,7 @@ const plugin = definePlugin({
           logCompletion(ctx, tool, runCtx, ms, "error");
           return validationError("artifactId is required and must be a non-empty string");
         }
-        const validFormats = ["step", "stl", "3mf"];
+        const validFormats = ["step", "stl", "3mf", "dxf", "svg"];
         if (typeof p.format !== "string" || !validFormats.includes(p.format)) {
           const ms = Date.now() - t0;
           await emitMetrics(anyCtx, tool, ms, true);
@@ -550,7 +560,7 @@ const plugin = definePlugin({
 
         const { artifactId, format, paperclipTicketId, toolCallId, filename } = p as {
           artifactId: string;
-          format: "step" | "stl" | "3mf";
+          format: "step" | "stl" | "3mf" | "dxf" | "svg";
           paperclipTicketId?: unknown;
           toolCallId?: unknown;
           filename?: unknown;

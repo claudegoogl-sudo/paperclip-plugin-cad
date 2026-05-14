@@ -30,7 +30,7 @@ export interface ExportResult {
   filePath: string;
 }
 
-export type ExportFormat = "step" | "stl" | "3mf";
+export type ExportFormat = "step" | "stl" | "3mf" | "dxf" | "svg";
 
 export interface CadWorker {
   /**
