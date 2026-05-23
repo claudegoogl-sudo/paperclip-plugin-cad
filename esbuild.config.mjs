@@ -32,6 +32,25 @@ const watch = process.argv.includes("--watch");
 
 if (!existsSync("dist")) mkdirSync("dist");
 
+// PLA-526 — single source of truth for the plugin version.
+//
+// `src/manifest.ts` previously hardcoded its `version` field, which had
+// drifted from `package.json.version` before (v0.1.3 / PLA-443 — manifest
+// said "0.1.2" while the tarball said "0.1.3", so `paperclipai plugin
+// inspect` reported the wrong version after a clean install). PLA-443
+// added a post-hoc parity vitest; PLA-526 makes drift impossible by
+// substituting `__PLUGIN_VERSION__` at build time via esbuild's `define`.
+// `src/globals.d.ts` declares the ambient for `tsc --noEmit`; the
+// constant is a string literal at runtime, byte-identical to
+// `package.json.version`. The post-build
+// `scripts/check-manifest-version.mjs` gate re-parses `dist/manifest.js`
+// and fails the build on any future mismatch (e.g. if the `define` line
+// is removed or a literal is reintroduced).
+const pkg = JSON.parse(readFileSync("package.json", "utf8"));
+const versionDefine = {
+  __PLUGIN_VERSION__: JSON.stringify(pkg.version),
+};
+
 const sharedOptions = {
   bundle: true,
   platform: "node",
@@ -39,6 +58,7 @@ const sharedOptions = {
   format: "esm",
   packages: "external",
   sourcemap: true,
+  define: versionDefine,
 };
 
 /**

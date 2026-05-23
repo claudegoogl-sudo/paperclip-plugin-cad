@@ -11,22 +11,30 @@ on:
   pull_request:
     paths:
       - 'src/manifest.ts'
+      - 'src/globals.d.ts'
+      - 'src/manifest.version-parity.test.ts'
       - 'package.json'
       - 'package-lock.json'
       - 'esbuild.config.mjs'
       - 'scripts/validate-manifest.mjs'
+      - 'scripts/check-manifest-version.mjs'
       - 'src/validate-manifest.test.ts'
+      - 'vitest.config.ts'
       - '.github/workflows/manifest-validate.yml'
   push:
     branches:
       - main
     paths:
       - 'src/manifest.ts'
+      - 'src/globals.d.ts'
+      - 'src/manifest.version-parity.test.ts'
       - 'package.json'
       - 'package-lock.json'
       - 'esbuild.config.mjs'
       - 'scripts/validate-manifest.mjs'
+      - 'scripts/check-manifest-version.mjs'
       - 'src/validate-manifest.test.ts'
+      - 'vitest.config.ts'
       - '.github/workflows/manifest-validate.yml'
 
 jobs:
@@ -61,3 +69,13 @@ jobs:
         # Exits non-zero on any failure with a clear list of offending
         # fields — same code path that runs in `npm prepack`.
         run: npm run validate:manifest
+
+      - name: Check manifest.version == package.json.version (PLA-526)
+        # Re-parses the BUILT dist/manifest.js (not just the source) and
+        # asserts manifest.version === package.json.version. Catches any
+        # future regression in the esbuild `define` injection
+        # (e.g. someone reintroducing a hardcoded literal or removing
+        # the define entry). Already runs as a `postbuild` hook on every
+        # `npm run build`, but adding it as an explicit CI step gives
+        # an unambiguous PR signal.
+        run: npm run check:manifest-version

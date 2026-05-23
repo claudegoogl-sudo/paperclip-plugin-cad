@@ -6,10 +6,12 @@
   "description": "CadQuery plugin for Paperclip — lets agents design and render 3D CAD models via tool calls",
   "scripts": {
     "build": "node ./esbuild.config.mjs",
+    "postbuild": "npm run check:manifest-version",
     "dev": "node ./esbuild.config.mjs --watch",
     "test": "vitest run --config ./vitest.config.ts",
     "typecheck": "tsc --noEmit",
     "validate:manifest": "node ./scripts/validate-manifest.mjs",
+    "check:manifest-version": "node ./scripts/check-manifest-version.mjs",
     "check:release-tarball": "node ./scripts/check-release-tarball.mjs --keep",
     "check:release-tarball:self-test": "node ./scripts/check-release-tarball.mjs --self-test",
     "prepack": "make -C worker && npm run build && npm run validate:manifest"
@@ -33,6 +35,7 @@
     "worker/seccomp_filter_compile",
     "worker/seccomp_load.py",
     "scripts/validate-manifest.mjs",
+    "scripts/check-manifest-version.mjs",
     "scripts/check-release-tarball.mjs",
     "esbuild.config.mjs",
     "tsconfig.json",
