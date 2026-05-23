@@ -51,10 +51,15 @@ type ManifestWithRuntimeRequirements = PaperclipPluginManifestV1 & {
   };
 };
 
+// `__PLUGIN_VERSION__` is substituted at build time from
+// `package.json.version` by esbuild's `define` (see `esbuild.config.mjs`).
+// PLA-526 made `package.json.version` the single source of truth so the
+// installed plugin's reported version cannot drift from the package
+// version (PLA-443 was a manual-edit miss that this structural fix prevents).
 const manifest: ManifestWithRuntimeRequirements = {
   id: "platform.cad",
   apiVersion: 1,
-  version: "0.1.6",
+  version: __PLUGIN_VERSION__,
   displayName: "CAD (CadQuery)",
   description:
     "Lets agents design and export 3D CAD models via CadQuery tool calls. " +
