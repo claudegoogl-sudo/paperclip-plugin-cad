@@ -4,6 +4,53 @@ Tracker: [PLA-32](/PLA/issues/PLA-32)
 
 ---
 
+## v0.1.7 — 2026-05-29
+
+### Fixed
+
+- **Bundle `@paperclipai/plugin-sdk` into `dist/worker.js` so `install -l`
+  works against a bare-extracted tarball with no `node_modules`.** The worker
+  build set `packages: "external"`, so `dist/worker.js` imported the SDK as a
+  bare runtime external. The host's `plugin install -l <dir>` registers a
+  package directory as-is and does **not** run `npm install`, so a bare
+  `tar -xzf` (used to stage the persistent package root after the v525 `/tmp`
+  sweep) dropped `node_modules/@paperclipai/plugin-sdk` and the worker died on
+  activation with `ERR_MODULE_NOT_FOUND`. The v428 install only worked because
+  the old flow ran `npm install --omit=dev` in the extract dir. Adopts
+  klipper's self-contained worker pattern: the SDK is now inlined.
+  [PLA-646](/PLA/issues/PLA-646) (prevention counterpart to
+  [PLA-639](/PLA/issues/PLA-639) / [PLA-637](/PLA/issues/PLA-637); detection is
+  [PLA-640](/PLA/issues/PLA-640)).
+
+### Changed
+
+- `esbuild.config.mjs` splits the single build context into a **manifest**
+  context (keeps `packages: "external"`; `src/manifest.ts` imports the SDK
+  type-only, so `dist/manifest.js` has no runtime SDK import) and a **worker**
+  context that drops `packages: "external"`. Node builtins stay external
+  automatically (`platform: "node"`); the SDK and its transitive deps are
+  inlined into `dist/worker.js`. Mirrors klipper's worker preset (only
+  `react`/`react-dom` external — neither imported by CAD).
+
+### Verification
+
+- `npm run build` → `dist/worker.js` has zero non-`node:` imports
+  (`grep -E "from ['\"]@paperclipai/plugin-sdk['\"]" dist/worker.js` → none).
+- `vitest run` — 28/28 pass (incl. manifest version-parity 0.1.7 and
+  validate-manifest).
+- Bare-extract simulation: `tar -xzf` into a fresh dir with **no
+  `node_modules`**, `import("…/dist/worker.js")` resolves (default export
+  `{ definition }`); a piped `initialize` JSON-RPC round-trips
+  `{"id":1,"result":{"ok":true,"supportedMethods":["health"]}}` — confirms the
+  428-built bundled worker speaks the host RPC handshake.
+- `tar tzf platform-paperclip-plugin-cad-0.1.7.tgz` ships `dist/cad_worker.py`,
+  `worker/seccomp_filter.bpf`, `worker/cad_preexec`, `worker/seccomp_load.py`,
+  and the `.sha256` sidecars.
+- Live `install -l` + `platform.cad` activation on the v525 host is
+  board-gated (operator); request prepared on PLA-646.
+
+---
+
 ## v0.1.6 — 2026-05-14
 
 ### Fixed
