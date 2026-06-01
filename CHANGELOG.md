@@ -4,6 +4,46 @@ Tracker: [PLA-32](/PLA/issues/PLA-32)
 
 ---
 
+## v0.1.8 — 2026-06-01
+
+### Fixed
+
+- **Bundle `@paperclipai/plugin-sdk` into `dist/worker.js` so the release
+  tarball activates standalone.** CAD imported the SDK as a runtime
+  dependency and marked it `external` in the worker build, so a bare-extracted
+  tarball (`plugin install -l <dir>`, which does **not** run `npm install`)
+  had no `node_modules/@paperclipai/plugin-sdk` and died on activation with
+  `ERR_MODULE_NOT_FOUND` — the v525 CAD outage
+  ([PLA-639](/PLA/issues/PLA-639)). Live `0.1.6` only stayed healthy via a
+  manual `npm install --omit=dev` hotfix next to the worker, which any
+  re-install / upgrade / new-tenant install / swept staging dir would
+  re-break. The worker entry now bundles the SDK (and its transitive
+  `@paperclipai/shared`) so the tarball is self-contained, mirroring klipper.
+  ([PLA-748](/PLA/issues/PLA-748))
+
+### Changed
+
+- `esbuild.config.mjs` splits the manifest and worker into separate build
+  contexts: the manifest keeps `packages: "external"` (it imports the SDK
+  type-only, so output is byte-identical), while the worker drops it so the
+  SDK is inlined. Node builtins remain external automatically via
+  `platform: "node"`.
+- `scripts/check-release-tarball.mjs` adds a self-contained-bundle gate: it
+  reads the packed `dist/worker.js` and fails the release check if any
+  external `@paperclipai/*` import survives, so a future un-bundling regresses
+  CI instead of only failing at worker boot.
+
+### Verified
+
+- `npm run check:release-tarball` — green: all runtime assets present **and**
+  `dist/worker.js` self-contained (no external `@paperclipai/*` import).
+- `scripts/plugin-activation-soak.mjs` (fork-master version, no npm-install
+  staging) with `SOAK_CAD_TARBALL=<cad-0.1.8 .tgz>` +
+  `SOAK_KLIPPER_TARBALL=<klipper-0.1.7 .tgz>` — ×3 `ok: true`, `platform.cad`
+  `status: ready`, persistent packagePath, no `ERR_MODULE_NOT_FOUND`.
+
+---
+
 ## v0.1.6 — 2026-05-14
 
 ### Fixed
