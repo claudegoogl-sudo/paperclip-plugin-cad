@@ -4,17 +4,17 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
-// ../pla748-cad/node_modules/@paperclipai/plugin-sdk/dist/define-plugin.js
+// node_modules/@paperclipai/plugin-sdk/dist/define-plugin.js
 function definePlugin(definition) {
   return Object.freeze({ definition });
 }
 
-// ../pla748-cad/node_modules/@paperclipai/plugin-sdk/dist/worker-rpc-host.js
+// node_modules/@paperclipai/plugin-sdk/dist/worker-rpc-host.js
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-// ../pla748-cad/node_modules/@paperclipai/plugin-sdk/dist/protocol.js
+// node_modules/@paperclipai/plugin-sdk/dist/protocol.js
 var JSONRPC_VERSION = "2.0";
 var JSONRPC_ERROR_CODES = {
   /** Invalid JSON was received by the server. */
@@ -144,7 +144,7 @@ var JsonRpcCallError = class extends Error {
   }
 };
 
-// ../pla748-cad/node_modules/@paperclipai/plugin-sdk/dist/worker-rpc-host.js
+// node_modules/@paperclipai/plugin-sdk/dist/worker-rpc-host.js
 var DEFAULT_RPC_TIMEOUT_MS = 3e4;
 function runWorker(plugin2, moduleUrl, options) {
   if (options?.stdin != null && options?.stdout != null) {
@@ -1148,7 +1148,7 @@ function startWorkerRpcHost(options) {
   };
 }
 
-// ../pla748-cad/node_modules/zod/v3/external.js
+// node_modules/zod/v3/external.js
 var external_exports = {};
 __export(external_exports, {
   BRAND: () => BRAND,
@@ -1260,7 +1260,7 @@ __export(external_exports, {
   void: () => voidType
 });
 
-// ../pla748-cad/node_modules/zod/v3/helpers/util.js
+// node_modules/zod/v3/helpers/util.js
 var util;
 (function(util2) {
   util2.assertEqual = (_) => {
@@ -1394,7 +1394,7 @@ var getParsedType = (data) => {
   }
 };
 
-// ../pla748-cad/node_modules/zod/v3/ZodError.js
+// node_modules/zod/v3/ZodError.js
 var ZodIssueCode = util.arrayToEnum([
   "invalid_type",
   "invalid_literal",
@@ -1512,7 +1512,7 @@ ZodError.create = (issues) => {
   return error;
 };
 
-// ../pla748-cad/node_modules/zod/v3/locales/en.js
+// node_modules/zod/v3/locales/en.js
 var errorMap = (issue, _ctx) => {
   let message;
   switch (issue.code) {
@@ -1615,7 +1615,7 @@ var errorMap = (issue, _ctx) => {
 };
 var en_default = errorMap;
 
-// ../pla748-cad/node_modules/zod/v3/errors.js
+// node_modules/zod/v3/errors.js
 var overrideErrorMap = en_default;
 function setErrorMap(map) {
   overrideErrorMap = map;
@@ -1624,7 +1624,7 @@ function getErrorMap() {
   return overrideErrorMap;
 }
 
-// ../pla748-cad/node_modules/zod/v3/helpers/parseUtil.js
+// node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
   const { data, path: path4, errorMaps, issueData } = params;
   const fullPath = [...path4, ...issueData.path || []];
@@ -1734,14 +1734,14 @@ var isDirty = (x) => x.status === "dirty";
 var isValid = (x) => x.status === "valid";
 var isAsync = (x) => typeof Promise !== "undefined" && x instanceof Promise;
 
-// ../pla748-cad/node_modules/zod/v3/helpers/errorUtil.js
+// node_modules/zod/v3/helpers/errorUtil.js
 var errorUtil;
 (function(errorUtil2) {
   errorUtil2.errToObj = (message) => typeof message === "string" ? { message } : message || {};
   errorUtil2.toString = (message) => typeof message === "string" ? message : message?.message;
 })(errorUtil || (errorUtil = {}));
 
-// ../pla748-cad/node_modules/zod/v3/types.js
+// node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
   constructor(parent, value, path4, key) {
     this._cachedPath = [];
@@ -5189,7 +5189,7 @@ var coerce = {
 };
 var NEVER = INVALID;
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/constants.js
+// node_modules/@paperclipai/shared/dist/constants.js
 var COMPANY_STATUSES = ["active", "paused", "archived"];
 var DEFAULT_COMPANY_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
 var MAX_COMPANY_ATTACHMENT_MAX_BYTES = 1024 * 1024 * 1024;
@@ -5609,11 +5609,11 @@ var PLUGIN_STATE_SCOPE_KINDS = [
   "run"
 ];
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/adapter-type.js
+// node_modules/@paperclipai/shared/dist/adapter-type.js
 var agentAdapterTypeSchema = external_exports.string().trim().min(1).default("process").describe(`Known built-in adapters: ${AGENT_ADAPTER_TYPES.join(", ")}. External adapters may register additional non-empty string types at runtime.`);
 var optionalAgentAdapterTypeSchema = external_exports.string().trim().min(1).optional();
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/network-bind.js
+// node_modules/@paperclipai/shared/dist/network-bind.js
 function normalizeHost(host) {
   const trimmed = host?.trim();
   return trimmed ? trimmed : void 0;
@@ -5656,7 +5656,7 @@ function validateConfiguredBindMode(input) {
   return errors;
 }
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/validators/sidebar-preferences.js
+// node_modules/@paperclipai/shared/dist/validators/sidebar-preferences.js
 var sidebarOrderedIdSchema = external_exports.string().uuid();
 var sidebarOrderPreferenceSchema = external_exports.object({
   orderedIds: external_exports.array(sidebarOrderedIdSchema),
@@ -5666,7 +5666,7 @@ var upsertSidebarOrderPreferenceSchema = external_exports.object({
   orderedIds: external_exports.array(sidebarOrderedIdSchema)
 });
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/validators/execution-workspace.js
+// node_modules/@paperclipai/shared/dist/validators/execution-workspace.js
 var executionWorkspaceStatusSchema = external_exports.enum([
   "active",
   "idle",
@@ -5786,14 +5786,14 @@ var updateExecutionWorkspaceSchema = external_exports.object({
   metadata: external_exports.record(external_exports.unknown()).optional().nullable()
 }).strict();
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/types/feedback.js
+// node_modules/@paperclipai/shared/dist/types/feedback.js
 var FEEDBACK_TARGET_TYPES = ["issue_comment", "issue_document_revision"];
 var FEEDBACK_VOTE_VALUES = ["up", "down"];
 var FEEDBACK_DATA_SHARING_PREFERENCES = ["allowed", "not_allowed", "prompt"];
 var DEFAULT_FEEDBACK_DATA_SHARING_PREFERENCE = "prompt";
 var FEEDBACK_TRACE_STATUSES = ["local_only", "pending", "sent", "failed"];
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/types/instance.js
+// node_modules/@paperclipai/shared/dist/types/instance.js
 var DAILY_RETENTION_PRESETS = [3, 7, 14];
 var WEEKLY_RETENTION_PRESETS = [1, 2, 4];
 var MONTHLY_RETENTION_PRESETS = [1, 3, 6];
@@ -5806,7 +5806,7 @@ var DEFAULT_BACKUP_RETENTION = {
   monthlyMonths: 1
 };
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/validators/feedback.js
+// node_modules/@paperclipai/shared/dist/validators/feedback.js
 var feedbackTargetTypeSchema = external_exports.enum(FEEDBACK_TARGET_TYPES);
 var feedbackTraceStatusSchema = external_exports.enum(FEEDBACK_TRACE_STATUSES);
 var feedbackVoteValueSchema = external_exports.enum(FEEDBACK_VOTE_VALUES);
@@ -5819,7 +5819,7 @@ var upsertIssueFeedbackVoteSchema = external_exports.object({
   allowSharing: external_exports.boolean().optional()
 });
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/validators/instance.js
+// node_modules/@paperclipai/shared/dist/validators/instance.js
 function presetSchema(presets, label) {
   return external_exports.number().refine((v) => presets.includes(v), { message: `${label} must be one of: ${presets.join(", ")}` });
 }
@@ -5847,7 +5847,7 @@ var issueGraphLivenessAutoRecoveryRequestSchema = external_exports.object({
   lookbackHours: external_exports.number().int().min(MIN_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS).max(MAX_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS).optional()
 }).strict();
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/validators/budget.js
+// node_modules/@paperclipai/shared/dist/validators/budget.js
 var upsertBudgetPolicySchema = external_exports.object({
   scopeType: external_exports.enum(BUDGET_SCOPE_TYPES),
   scopeId: external_exports.string().uuid(),
@@ -5873,7 +5873,7 @@ var resolveBudgetIncidentSchema = external_exports.object({
   }
 });
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/validators/company.js
+// node_modules/@paperclipai/shared/dist/validators/company.js
 var logoAssetIdSchema = external_exports.string().uuid().nullable().optional();
 var brandColorSchema = external_exports.string().regex(/^#[0-9a-fA-F]{6}$/).nullable().optional();
 var feedbackDataSharingTermsVersionSchema = external_exports.string().min(1).nullable().optional();
@@ -5903,7 +5903,7 @@ var updateCompanyBrandingSchema = external_exports.object({
   logoAssetId: logoAssetIdSchema
 }).strict().refine((value) => value.name !== void 0 || value.description !== void 0 || value.brandColor !== void 0 || value.logoAssetId !== void 0, "At least one branding field must be provided");
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/validators/environment.js
+// node_modules/@paperclipai/shared/dist/validators/environment.js
 var environmentDriverSchema = external_exports.enum(ENVIRONMENT_DRIVERS);
 var environmentStatusSchema = external_exports.enum(ENVIRONMENT_STATUSES);
 var environmentLeaseStatusSchema = external_exports.enum(ENVIRONMENT_LEASE_STATUSES);
@@ -5933,7 +5933,7 @@ var probeEnvironmentConfigSchema = external_exports.object({
   metadata: external_exports.record(external_exports.unknown()).optional().nullable()
 }).strict();
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/validators/company-skill.js
+// node_modules/@paperclipai/shared/dist/validators/company-skill.js
 var companySkillSourceTypeSchema = external_exports.enum(["local_path", "github", "url", "catalog", "skills_sh"]);
 var companySkillTrustLevelSchema = external_exports.enum(["markdown_only", "assets", "scripts_executables"]);
 var companySkillCompatibilitySchema = external_exports.enum(["compatible", "unknown", "invalid"]);
@@ -6049,7 +6049,7 @@ var companySkillFileUpdateSchema = external_exports.object({
   content: external_exports.string()
 });
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/validators/adapter-skills.js
+// node_modules/@paperclipai/shared/dist/validators/adapter-skills.js
 var agentSkillStateSchema = external_exports.enum([
   "available",
   "configured",
@@ -6097,13 +6097,13 @@ var agentSkillSyncSchema = external_exports.object({
   desiredSkills: external_exports.array(external_exports.string().min(1))
 });
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/validators/text.js
+// node_modules/@paperclipai/shared/dist/validators/text.js
 function normalizeEscapedLineBreaks(value) {
   return value.replace(/\\r\\n/g, "\n").replace(/\\n/g, "\n").replace(/\\r/g, "\n");
 }
 var multilineTextSchema = external_exports.string().transform(normalizeEscapedLineBreaks);
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/validators/issue.js
+// node_modules/@paperclipai/shared/dist/validators/issue.js
 var ISSUE_EXECUTION_WORKSPACE_PREFERENCES = [
   "inherit",
   "shared_workspace",
@@ -6479,7 +6479,7 @@ var upsertIssueDocumentSchema = external_exports.object({
 });
 var restoreIssueDocumentRevisionSchema = external_exports.object({});
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/validators/routine.js
+// node_modules/@paperclipai/shared/dist/validators/routine.js
 var routineVariableValueSchema = external_exports.union([external_exports.string(), external_exports.number().finite(), external_exports.boolean()]);
 var routineVariableSchema = external_exports.object({
   name: external_exports.string().trim().regex(/^[A-Za-z][A-Za-z0-9_]*$/),
@@ -6568,7 +6568,7 @@ var runRoutineSchema = external_exports.object({
 });
 var rotateRoutineTriggerSecretSchema = external_exports.object({});
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/validators/company-portability.js
+// node_modules/@paperclipai/shared/dist/validators/company-portability.js
 var portabilityIncludeSchema = external_exports.object({
   company: external_exports.boolean().optional(),
   agents: external_exports.boolean().optional(),
@@ -6782,7 +6782,7 @@ var companyPortabilityImportSchema = companyPortabilityPreviewSchema.extend({
   adapterOverrides: external_exports.record(external_exports.string().min(1), portabilityAdapterOverrideSchema).optional()
 });
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/validators/secret.js
+// node_modules/@paperclipai/shared/dist/validators/secret.js
 var envBindingPlainSchema = external_exports.object({
   type: external_exports.literal("plain"),
   value: external_exports.string()
@@ -6815,7 +6815,7 @@ var updateSecretSchema = external_exports.object({
   externalRef: external_exports.string().optional().nullable()
 });
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/validators/agent.js
+// node_modules/@paperclipai/shared/dist/validators/agent.js
 var agentPermissionsSchema = external_exports.object({
   canCreateAgents: external_exports.boolean().optional().default(false)
 });
@@ -6907,7 +6907,7 @@ var updateAgentPermissionsSchema = external_exports.object({
   canAssignTasks: external_exports.boolean()
 });
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/validators/project.js
+// node_modules/@paperclipai/shared/dist/validators/project.js
 var executionWorkspaceStrategySchema2 = external_exports.object({
   type: external_exports.enum(["project_primary", "git_worktree", "adapter_managed", "cloud_sandbox"]).optional(),
   baseRef: external_exports.string().optional().nullable(),
@@ -7003,7 +7003,7 @@ var createProjectSchema = external_exports.object({
 });
 var updateProjectSchema = external_exports.object(projectFields).partial();
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/validators/issue-tree-control.js
+// node_modules/@paperclipai/shared/dist/validators/issue-tree-control.js
 var issueTreeControlModeSchema = external_exports.enum(ISSUE_TREE_CONTROL_MODES);
 var issueTreeHoldReleasePolicySchema = external_exports.object({
   strategy: external_exports.enum(ISSUE_TREE_HOLD_RELEASE_POLICY_STRATEGIES).default("manual"),
@@ -7025,7 +7025,7 @@ var releaseIssueTreeHoldSchema = external_exports.object({
   metadata: external_exports.record(external_exports.unknown()).optional().nullable()
 }).strict();
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/validators/work-product.js
+// node_modules/@paperclipai/shared/dist/validators/work-product.js
 var issueWorkProductTypeSchema = external_exports.enum([
   "preview_url",
   "runtime_service",
@@ -7071,7 +7071,7 @@ var createIssueWorkProductSchema = external_exports.object({
 });
 var updateIssueWorkProductSchema = createIssueWorkProductSchema.partial();
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/validators/goal.js
+// node_modules/@paperclipai/shared/dist/validators/goal.js
 var createGoalSchema = external_exports.object({
   title: external_exports.string().min(1),
   description: external_exports.string().optional().nullable(),
@@ -7082,7 +7082,7 @@ var createGoalSchema = external_exports.object({
 });
 var updateGoalSchema = createGoalSchema.partial();
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/validators/approval.js
+// node_modules/@paperclipai/shared/dist/validators/approval.js
 var createApprovalSchema = external_exports.object({
   type: external_exports.enum(APPROVAL_TYPES),
   requestedByAgentId: external_exports.string().uuid().optional().nullable(),
@@ -7102,7 +7102,7 @@ var addApprovalCommentSchema = external_exports.object({
   body: multilineTextSchema.pipe(external_exports.string().min(1))
 });
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/validators/cost.js
+// node_modules/@paperclipai/shared/dist/validators/cost.js
 var createCostEventSchema = external_exports.object({
   agentId: external_exports.string().uuid(),
   issueId: external_exports.string().uuid().optional().nullable(),
@@ -7127,7 +7127,7 @@ var updateBudgetSchema = external_exports.object({
   budgetMonthlyCents: external_exports.number().int().nonnegative()
 });
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/validators/finance.js
+// node_modules/@paperclipai/shared/dist/validators/finance.js
 var createFinanceEventSchema = external_exports.object({
   agentId: external_exports.string().uuid().optional().nullable(),
   issueId: external_exports.string().uuid().optional().nullable(),
@@ -7158,12 +7158,12 @@ var createFinanceEventSchema = external_exports.object({
   currency: value.currency.toUpperCase()
 }));
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/validators/asset.js
+// node_modules/@paperclipai/shared/dist/validators/asset.js
 var createAssetImageMetadataSchema = external_exports.object({
   namespace: external_exports.string().trim().min(1).max(120).regex(/^[a-zA-Z0-9/_-]+$/).optional()
 });
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/validators/access.js
+// node_modules/@paperclipai/shared/dist/validators/access.js
 var createCompanyInviteSchema = external_exports.object({
   allowedJoinTypes: external_exports.enum(INVITE_JOIN_TYPES).default("both"),
   humanRole: external_exports.enum(HUMAN_COMPANY_MEMBERSHIP_ROLES).optional().nullable(),
@@ -7281,7 +7281,7 @@ var updateCurrentUserProfileSchema = external_exports.object({
   image: external_exports.union([profileImageSchema, external_exports.literal(""), external_exports.null()]).optional().transform((value) => value === "" ? null : value)
 });
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/validators/plugin.js
+// node_modules/@paperclipai/shared/dist/validators/plugin.js
 var jsonSchemaSchema = external_exports.record(external_exports.unknown()).refine((val) => {
   if (Object.keys(val).length === 0)
     return true;
@@ -7757,7 +7757,7 @@ var listPluginStateSchema = external_exports.object({
   namespace: external_exports.string().min(1).optional()
 });
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/api.js
+// node_modules/@paperclipai/shared/dist/api.js
 var API_PREFIX = "/api";
 var API = {
   health: `${API_PREFIX}/health`,
@@ -7781,7 +7781,7 @@ var API = {
   admin: `${API_PREFIX}/admin`
 };
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/routine-variables.js
+// node_modules/@paperclipai/shared/dist/routine-variables.js
 var HUMAN_TIMESTAMP_FORMATTER = new Intl.DateTimeFormat("en-US", {
   year: "numeric",
   month: "long",
@@ -7793,7 +7793,7 @@ var HUMAN_TIMESTAMP_FORMATTER = new Intl.DateTimeFormat("en-US", {
   timeZoneName: "short"
 });
 
-// ../pla748-cad/node_modules/@paperclipai/shared/dist/config-schema.js
+// node_modules/@paperclipai/shared/dist/config-schema.js
 var configMetaSchema = external_exports.object({
   version: external_exports.literal(1),
   updatedAt: external_exports.string(),
@@ -7963,7 +7963,7 @@ import { execSync } from "node:child_process";
 import { createHash } from "node:crypto";
 
 // src/manifest.ts
-var SECCOMP_FILTER_SHA256_PIN = "__PLA114_SECCOMP_FILTER_SHA256__";
+var SECCOMP_FILTER_SHA256_PIN = "6bdbbc4fdfb3d80996c66a812df450c95043a86364fe8955651ec867859617ba";
 var SECCOMP_LOADER_SHA256_PIN = "0fc1b58d38895fb2dc7be1464b1230344530aa7f168af9478fa47153e20f8be0";
 
 // src/cad-intake.ts
