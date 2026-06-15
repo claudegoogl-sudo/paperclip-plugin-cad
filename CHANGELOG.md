@@ -4,6 +4,27 @@ Tracker: [PLA-32](/PLA/issues/PLA-32)
 
 ---
 
+## v0.1.11 — 2026-06-15
+
+### Added
+
+- **Optional read-only intake PAT — separation of duties
+  ([PLA-1094](/PLA/issues/PLA-1094), parent
+  [PLA-1092](/PLA/issues/PLA-1092)).** New optional `intakePatSecretId`
+  (`format: "secret-ref"`) in `instanceConfigSchema`. The `inputArtifacts`
+  intake-fetch path now resolves `intakePatSecretId ?? githubPatSecretId`, so
+  intake can read via a dedicated Contents:Read-only token while
+  `cad.export` keeps using the read/write `githubPatSecretId`. When
+  `intakePatSecretId` is unset, intake behaviour is byte-identical to the
+  prior shared-PAT path — no migration, no new required config. A
+  `intakePat: "dedicated" | "shared"` field is logged on each intake fetch
+  for observability. See `src/worker.ts` (intake resolve) and
+  `src/manifest.ts` (schema). Builds on the 0.1.9 intake read path
+  ([PLA-1089](/PLA/issues/PLA-1089)); 0.1.10 was the interim staging-cap
+  hardening ([PLA-1101](/PLA/issues/PLA-1101)).
+
+---
+
 ## v0.1.9 — 2026-06-15
 
 ### Added

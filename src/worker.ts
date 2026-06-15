@@ -57,6 +57,10 @@ import {
 
 interface CadPluginConfig {
   githubPatSecretId: string;
+  // PLA-1094: optional read-only intake PAT. Intake resolves
+  // `intakePatSecretId ?? githubPatSecretId`; export always uses
+  // githubPatSecretId. Unset → byte-identical shared-PAT behaviour.
+  intakePatSecretId?: string;
   artifactRepoUrl?: string;
   artifactRepoBranch?: string;
 }
@@ -585,16 +589,20 @@ const plugin = definePlugin({
         }
         if (parsedInputs.repoPaths.length > 0) {
           const config = (await ctx.config.get()) as unknown as CadPluginConfig;
-          if (!config.githubPatSecretId) {
+          // PLA-1094 separation-of-duties: intake reads via the optional
+          // read-only intakePatSecretId, falling back to the shared
+          // githubPatSecretId when unset (back-compat). Export is untouched.
+          const intakeSecretId = config.intakePatSecretId ?? config.githubPatSecretId;
+          if (!intakeSecretId) {
             const ms = Date.now() - t0;
             await emitMetrics(anyCtx, tool, ms, true);
             logCompletion(ctx, tool, runCtx, ms, "error");
-            return { data: { error: "prerequisite_missing", message: "inputArtifacts requires githubPatSecretId to be configured." } };
+            return { data: { error: "prerequisite_missing", message: "inputArtifacts requires githubPatSecretId (or intakePatSecretId) to be configured." } };
           }
           const repoUrl = config.artifactRepoUrl ?? DEFAULT_ARTIFACT_REPO_URL;
           const branch = config.artifactRepoBranch ?? DEFAULT_ARTIFACT_BRANCH;
-          ctx.logger.info("cad.run_script: fetching inputArtifacts", { count: parsedInputs.repoPaths.length });
-          const pat = await ctx.secrets.resolve(config.githubPatSecretId);
+          ctx.logger.info("cad.run_script: fetching inputArtifacts", { count: parsedInputs.repoPaths.length, intakePat: config.intakePatSecretId ? "dedicated" : "shared" });
+          const pat = await ctx.secrets.resolve(intakeSecretId);
           try {
             inputFiles = await fetchInputArtifacts(pat, repoUrl, branch, parsedInputs.repoPaths);
           } catch (err) {

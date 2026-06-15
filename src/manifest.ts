@@ -121,6 +121,19 @@ const manifest: ManifestWithRuntimeRequirements = {
           "Paperclip secret UUID for the GitHub PAT used to push CAD artifacts. " +
           "Create the secret in the board UI and paste its UUID here.",
       },
+      // PLA-1094 separation-of-duties: optional read-only intake token. When
+      // unset, intake falls back to githubPatSecretId (byte-identical to the
+      // pre-1094 shared-PAT behaviour). Declared here because the schema is
+      // additionalProperties:false — an undeclared optional key would be
+      // rejected at host load. NOT in `required`.
+      intakePatSecretId: {
+        type: "string",
+        format: "secret-ref",
+        description:
+          "Optional Paperclip secret UUID for a Contents:Read-only GitHub PAT used " +
+          "ONLY by the inputArtifacts intake-fetch path. Falls back to " +
+          "githubPatSecretId when unset; export always uses githubPatSecretId.",
+      },
       artifactRepoUrl: {
         type: "string",
         description:
