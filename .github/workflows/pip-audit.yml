@@ -26,4 +26,25 @@ jobs:
         run: pip install pip-audit
 
       - name: Run pip-audit
-        run: pip-audit -r worker/requirements-cad.txt
+        # Accepted, documented transitive findings (SecurityEngineer review, PLA-1133, 2026-06-15).
+        # vtk 9.3.1 (resolved transitively via cadquery 2.7.0 / cadquery-ocp 7.8.1.1.post1)
+        # carries 3 CVEs, ALL confined to vtkGLTFDocumentLoader (the GLTF/.glb import path):
+        #   PYSEC-2025-224  CVSS 7.5  buffer overflow in BufferDataExtractionWorker
+        #   PYSEC-2025-225  CVSS 7.1  heap buffer overflow in Accessor copy ctor
+        #   PYSEC-2025-226  CVSS 9.8  heap use-after-free during mesh copy
+        # Fixed upstream in vtk 9.5.1.
+        # NOT REACHABLE in this deployment: the cad worker only *generates* geometry from
+        # build scripts and *exports* via cq.exporters (STEP/STL/3MF). It never imports or
+        # parses GLTF, so vtkGLTFDocumentLoader is never invoked. The worker additionally
+        # runs in a bwrap+seccomp sandbox with no network and a mount allowlist.
+        # Pre-existing transitive (identical findings on origin/main baseline; not introduced
+        # by this PR). vtk cannot be pinned independently because cadquery-ocp 7.8.1.1.post1
+        # is ABI-bound to its vtk build; a real fix requires a cadquery/ocp stack bump.
+        # Re-pin to vtk>=9.5.1 tracked in PLA-1135; revisit IMMEDIATELY if the worker ever
+        # gains a mesh/GLTF import path. --ignore-vuln only suppresses these named IDs, so the
+        # gate still fails on any new or different vulnerability.
+        run: >-
+          pip-audit -r worker/requirements-cad.txt
+          --ignore-vuln PYSEC-2025-224
+          --ignore-vuln PYSEC-2025-225
+          --ignore-vuln PYSEC-2025-226

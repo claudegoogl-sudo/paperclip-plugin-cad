@@ -12,6 +12,28 @@ Install the plugin from the Paperclip board:
 
 The plugin registers two tools on every agent it is enabled for: `cad.run_script` and `cad.export`.
 
+## Host provisioning (required on every host rebuild)
+
+`cad.run_script` runs each CadQuery script inside a `bwrap` sandbox that ro-binds
+`/usr` only (`HOME=/tmp`, `--tmpfs /tmp`). The only Python site visible inside
+that sandbox is `/usr/local/lib/python3.12/dist-packages`, so the worker's mesh
+deps (`trimesh`, `manifold3d`) **must** be installed there — not into
+`--user`/`~/.local` (which is `/tmp/.local` in-sandbox = invisible) and not into
+`/tmp`. These deps do not survive a host rebuild unless re-provisioned.
+
+Run the committed, idempotent provisioning script as root after any host
+rebuild/redeploy (it reads the pins from `worker/requirements-cad.txt` and
+installs them into the sandbox-visible site, then verifies the import under the
+real sandbox shape):
+
+```
+sudo bash scripts/provision-cad-host.sh
+```
+
+A successful run prints `SANDBOX_IMPORT_OK ...` and `RESULT: SUCCESS`. Re-running
+is safe (pip `--target` converges). See [PLA-1124](/PLA/issues/PLA-1124) /
+[PLA-1127](/PLA/issues/PLA-1127) for the durability rationale.
+
 ## Minimal example
 
 ```
