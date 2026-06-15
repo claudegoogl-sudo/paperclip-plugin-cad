@@ -74,16 +74,17 @@ const SUITE_TIMEOUT_MS = 20 * 60_000;
  * PLA-1109: the p95 adder = bwrap.p95 − dev_direct.p95, both co-measured
  * interleaved (PLA-1097) through the same invokeWorker path, so it is a
  * difference-of-percentiles statistic with a high cross-run noise floor on
- * GH-hosted runners. Characterized across ≥3 normal runs per branch the
- * genuine p95 adder lands ~70–101 ms (max observed 101.4 ms), i.e. it brushes
- * the original 100 ms §6.2 spec ceiling — a base run passed by only ~18 ms and
- * would flake red on its own. The 100 ms value is therefore too tight for this
- * runner class. Recalibrated to (max observed)×1.25 → 130 ms (CTO decision,
- * PLA-1109): ~28 % headroom over the worst observed for deterministic-green
- * while still failing on any regression that adds >~29 ms to the p95 cold-start
- * adder. p99 (200 ms) is untouched.
+ * GH-hosted runners. Across normal runs on both base and PR branches the
+ * genuine p95 adder lands ~70–108 ms (max observed 108.2 ms), i.e. it brushes
+ * and at times exceeds the original 100 ms §6.2 spec ceiling — a base run
+ * passed by only ~18 ms and a PR confirmation run measured 108.2 ms, both of
+ * which would flake red on their own. The 100 ms value is therefore too tight
+ * for this runner class. Recalibrated to (max observed)×1.25 → 140 ms (CTO
+ * decision formula, PLA-1109): ~29 % headroom over the worst observed for
+ * deterministic-green while still failing on any regression that adds >~32 ms
+ * to the p95 cold-start adder. p99 (200 ms) is untouched.
  */
-const P95_ADDER_CEILING_MS = 130;
+const P95_ADDER_CEILING_MS = 140;
 const P99_ADDER_CEILING_MS = 200;
 
 /**
