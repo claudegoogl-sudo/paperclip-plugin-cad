@@ -4,7 +4,7 @@ var SECCOMP_LOADER_SHA256_PIN = "0fc1b58d38895fb2dc7be1464b1230344530aa7f168af94
 var manifest = {
   id: "platform.cad",
   apiVersion: 1,
-  version: "0.1.8",
+  version: "0.1.9",
   displayName: "CAD (CadQuery)",
   description: "Lets agents design and export 3D CAD models via CadQuery tool calls. v0.1.0 surface: cad.run_script (execute Python \u2192 staged artifact) and cad.export (staged artifact \u2192 GitHub commit + permalink). Operator-confirmed via approval f420bc31.",
   author: "Platform",
@@ -85,6 +85,28 @@ var manifest = {
             minimum: 1,
             maximum: 300,
             description: "Execution timeout in seconds (1\u2013300, default: 30). Enforced by the CAD worker (sub-goal 2); stub accepts but ignores."
+          },
+          // PLA-1089 Ask 1 — host-mediated scan intake. The host fetches each
+          // repoPath from the cad-artifacts repo with the export PAT and stages
+          // it into the sandbox at inputs/<basename>; the script reads it via
+          // StlAPI_Reader("inputs/<basename>"). Path allowlist (user-uploads/,
+          // artifacts/), per-file 50 MiB + 120 MiB total + max-3 caps enforced
+          // host-side in worker.ts (see cad-intake.ts).
+          inputArtifacts: {
+            type: "array",
+            maxItems: 3,
+            items: {
+              type: "object",
+              properties: {
+                repoPath: {
+                  type: "string",
+                  description: "Path of an uploaded scan in the cad-artifacts repo (under user-uploads/ or artifacts/)."
+                }
+              },
+              required: ["repoPath"],
+              additionalProperties: false
+            },
+            description: "Optional scan/mesh files staged into the sandbox before the script runs (PLA-1089)."
           }
         },
         required: ["script"],

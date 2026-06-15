@@ -190,7 +190,7 @@ function startWorkerRpcHost(options) {
     stdoutStream.write(serialized);
   }
   function callHost(method, params, timeoutMs) {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve2, reject) => {
       if (!running) {
         reject(new Error(`Cannot call "${method}" \u2014 worker RPC host is not running`));
         return;
@@ -218,7 +218,7 @@ function startWorkerRpcHost(options) {
       pendingRequests.set(id, {
         resolve: (response) => {
           if (isJsonRpcSuccessResponse(response)) {
-            settle(resolve, response.result);
+            settle(resolve2, response.result);
           } else if (isJsonRpcErrorResponse(response)) {
             settle(reject, new JsonRpcCallError(response.error));
           } else {
@@ -1626,8 +1626,8 @@ function getErrorMap() {
 
 // node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path3, errorMaps, issueData } = params;
-  const fullPath = [...path3, ...issueData.path || []];
+  const { data, path: path4, errorMaps, issueData } = params;
+  const fullPath = [...path4, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -1743,11 +1743,11 @@ var errorUtil;
 
 // node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path3, key) {
+  constructor(parent, value, path4, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path3;
+    this._path = path4;
     this._key = key;
   }
   get path() {
@@ -7950,14 +7950,14 @@ var paperclipConfigSchema = external_exports.object({
 });
 
 // src/worker.ts
-import * as path2 from "node:path";
+import * as path3 from "node:path";
 
 // src/cad-worker-client.ts
 import { spawn } from "node:child_process";
 import { mkdtemp } from "node:fs/promises";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { tmpdir as tmpdir2 } from "node:os";
-import { join as join2, dirname } from "node:path";
+import { join as join3, dirname } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 import { execSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -7966,9 +7966,199 @@ import { createHash } from "node:crypto";
 var SECCOMP_FILTER_SHA256_PIN = "6bdbbc4fdfb3d80996c66a812df450c95043a86364fe8955651ec867859617ba";
 var SECCOMP_LOADER_SHA256_PIN = "0fc1b58d38895fb2dc7be1464b1230344530aa7f168af9478fa47153e20f8be0";
 
+// src/cad-intake.ts
+import * as path2 from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
+var MAX_INPUT_FILE_BYTES = 50 * 1024 * 1024;
+var MAX_INPUT_FILES = 3;
+var MAX_TOTAL_INPUT_BYTES = 120 * 1024 * 1024;
+var MAX_REPO_PATH_LEN = 512;
+var DEFAULT_INTAKE_CAPS = {
+  maxFileBytes: MAX_INPUT_FILE_BYTES,
+  maxTotalBytes: MAX_TOTAL_INPUT_BYTES
+};
+var INTAKE_ALLOWED_PREFIXES = ["user-uploads/", "artifacts/"];
+var IntakeError = class extends Error {
+  kind;
+  httpStatus;
+  constructor(kind, message, httpStatus) {
+    super(message);
+    this.name = "IntakeError";
+    this.kind = kind;
+    this.httpStatus = httpStatus;
+  }
+};
+var BASENAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+function assertSafeIntakePath(repoPath) {
+  if (typeof repoPath !== "string" || repoPath.length === 0) {
+    return "repoPath must be a non-empty string";
+  }
+  if (repoPath.length > MAX_REPO_PATH_LEN) {
+    return `repoPath exceeds ${MAX_REPO_PATH_LEN} characters`;
+  }
+  if (repoPath.includes("\0")) return "repoPath must not contain NUL";
+  if (repoPath.includes("\\")) return "repoPath must use forward slashes ('/'), not backslashes";
+  if (repoPath.startsWith("/")) return "repoPath must be relative (no leading '/')";
+  if (repoPath.endsWith("/")) return "repoPath must reference a file, not a directory (no trailing '/')";
+  const normalized = path2.posix.normalize(repoPath);
+  if (normalized !== repoPath) {
+    return "repoPath would normalize differently (path traversal blocked)";
+  }
+  if (repoPath.split("/").some((seg) => seg === "..")) {
+    return "repoPath must not contain '..' segments";
+  }
+  if (!INTAKE_ALLOWED_PREFIXES.some((p) => normalized.startsWith(p))) {
+    return `repoPath must be under one of: ${INTAKE_ALLOWED_PREFIXES.join(", ")}`;
+  }
+  const base = path2.posix.basename(normalized);
+  if (!base || base === "." || base === "..") {
+    return "repoPath must reference a file, not a directory";
+  }
+  if (!BASENAME_RE.test(base)) {
+    return "repoPath basename has disallowed characters (allowed: A-Za-z0-9._-, no leading dot)";
+  }
+  return null;
+}
+function parseInputArtifacts(raw) {
+  if (raw === void 0 || raw === null) return { repoPaths: [] };
+  if (!Array.isArray(raw)) return { error: "inputArtifacts must be an array" };
+  if (raw.length === 0) return { repoPaths: [] };
+  if (raw.length > MAX_INPUT_FILES) {
+    return { error: `inputArtifacts may contain at most ${MAX_INPUT_FILES} files` };
+  }
+  const repoPaths = [];
+  const seenBasenames = /* @__PURE__ */ new Set();
+  for (let i = 0; i < raw.length; i++) {
+    const item = raw[i];
+    if (typeof item !== "object" || item === null || Array.isArray(item)) {
+      return { error: `inputArtifacts[${i}] must be an object { repoPath }` };
+    }
+    const keys = Object.keys(item);
+    if (keys.some((k) => k !== "repoPath")) {
+      return { error: `inputArtifacts[${i}] has unexpected keys (only 'repoPath' allowed)` };
+    }
+    const repoPath = item.repoPath;
+    const err = assertSafeIntakePath(repoPath);
+    if (err) return { error: `inputArtifacts[${i}].${err}` };
+    const base = path2.posix.basename(repoPath);
+    if (seenBasenames.has(base)) {
+      return { error: `inputArtifacts[${i}] basename '${base}' collides with an earlier entry` };
+    }
+    seenBasenames.add(base);
+    repoPaths.push(repoPath);
+  }
+  return { repoPaths };
+}
+function parseGitHubUrl(repoUrl) {
+  let u;
+  try {
+    u = new URL(repoUrl);
+  } catch {
+    throw new IntakeError("prerequisite_missing", `Cannot parse artifact repo URL: ${repoUrl}`);
+  }
+  if (u.protocol !== "https:" || u.host !== "github.com") {
+    throw new IntakeError(
+      "prerequisite_missing",
+      `artifactRepoUrl must be an https://github.com/<owner>/<repo>(.git) URL. Got: ${repoUrl}`
+    );
+  }
+  const segs = u.pathname.replace(/^\/+/, "").replace(/\.git\/?$/, "").replace(/\/+$/, "").split("/");
+  if (segs.length !== 2 || !segs[0] || !segs[1]) {
+    throw new IntakeError("prerequisite_missing", `Cannot parse owner/repo from ${repoUrl}`);
+  }
+  return [segs[0], segs[1]];
+}
+function encodeRepoPathForUrl(repoPath) {
+  return repoPath.split("/").map(encodeURIComponent).join("/");
+}
+var FETCH_TIMEOUT_MS = 3e4;
+async function fetchInputArtifact(pat, repoUrl, branch, repoPath, fetchImpl = fetch, caps = DEFAULT_INTAKE_CAPS) {
+  const [owner, repo] = parseGitHubUrl(repoUrl);
+  const encodedPath = encodeRepoPathForUrl(repoPath);
+  const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodedPath}?ref=${encodeURIComponent(branch)}`;
+  const headers = {
+    Authorization: `Bearer ${pat}`,
+    // raw media type → bytes, not the base64-in-JSON envelope.
+    Accept: "application/vnd.github.raw",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": "paperclip-plugin-cad/intake"
+  };
+  let resp;
+  try {
+    resp = await fetchImpl(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+  } catch (err) {
+    throw new IntakeError("network", `Network error fetching input '${repoPath}': ${err.message}`);
+  }
+  if (resp.status === 404) {
+    throw new IntakeError("not_found", `Input artifact not found (404): ${repoPath}`, 404);
+  }
+  if (resp.status === 401 || resp.status === 403) {
+    throw new IntakeError(
+      "auth",
+      `Not authorized (${resp.status}) reading input '${repoPath}'. Verify the export PAT has read access to the artifact repo.`,
+      resp.status
+    );
+  }
+  if (!resp.ok) {
+    throw new IntakeError("network", `Unexpected ${resp.status} fetching input '${repoPath}'. Retry later.`, resp.status);
+  }
+  const clHeader = resp.headers.get("content-length");
+  if (clHeader !== null) {
+    const cl = Number(clHeader);
+    if (Number.isFinite(cl) && cl > caps.maxFileBytes) {
+      throw new IntakeError(
+        "too_large",
+        `Input '${repoPath}' is ${cl} bytes, over the ${caps.maxFileBytes}-byte per-file cap.`
+      );
+    }
+  }
+  const bytes = Buffer.from(await resp.arrayBuffer());
+  if (bytes.byteLength > caps.maxFileBytes) {
+    throw new IntakeError(
+      "too_large",
+      `Input '${repoPath}' is ${bytes.byteLength} bytes, over the ${caps.maxFileBytes}-byte per-file cap.`
+    );
+  }
+  return { basename: path2.posix.basename(repoPath), bytes };
+}
+async function fetchInputArtifacts(pat, repoUrl, branch, repoPaths, fetchImpl = fetch, caps = DEFAULT_INTAKE_CAPS) {
+  const files = [];
+  let total = 0;
+  for (const repoPath of repoPaths) {
+    const file = await fetchInputArtifact(pat, repoUrl, branch, repoPath, fetchImpl, caps);
+    total += file.bytes.byteLength;
+    if (total > caps.maxTotalBytes) {
+      throw new IntakeError(
+        "too_large",
+        `Combined input size ${total} bytes exceeds the ${caps.maxTotalBytes}-byte total cap.`
+      );
+    }
+    files.push(file);
+  }
+  return files;
+}
+async function stageInputFiles(workdir, files) {
+  if (!files.length) return;
+  const inputsDir = path2.join(workdir, "inputs");
+  await mkdir(inputsDir, { recursive: true });
+  const inputsResolved = path2.resolve(inputsDir);
+  for (const f of files) {
+    const base = path2.basename(f.basename);
+    if (!base || base === "." || base === "..") {
+      throw new IntakeError("validation", `refusing to stage input with unsafe basename '${f.basename}'`);
+    }
+    const dest = path2.join(inputsDir, base);
+    const destResolved = path2.resolve(dest);
+    if (destResolved !== path2.join(inputsResolved, base)) {
+      throw new IntakeError("validation", `refusing to stage input outside inputs/ dir: '${f.basename}'`);
+    }
+    await writeFile(dest, f.bytes);
+  }
+}
+
 // src/stub-cad-worker.ts
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join as join2 } from "node:path";
 var CadWorkerInternalError = class extends Error {
   code = "worker_internal";
   constructor(message) {
@@ -7976,7 +8166,7 @@ var CadWorkerInternalError = class extends Error {
     this.name = "CadWorkerInternalError";
   }
 };
-var ARTIFACT_STAGING_DIR = join(tmpdir(), "paperclip-cad-staging");
+var ARTIFACT_STAGING_DIR = join2(tmpdir(), "paperclip-cad-staging");
 
 // src/cad-worker-client.ts
 var GRACE_SECONDS = 5;
@@ -7985,14 +8175,14 @@ var MAX_TIMEOUT_SECONDS = 300;
 var DEFAULT_TIMEOUT_SECONDS = 30;
 var __filename = fileURLToPath2(import.meta.url);
 var __dirname = dirname(__filename);
-var WORKER_PY = join2(__dirname, "cad_worker.py");
-var SECCOMP_FILTER_PATH = join2(__dirname, "..", "worker", "seccomp_filter.bpf");
-var SECCOMP_LOADER_PATH = join2(__dirname, "..", "worker", "seccomp_load.py");
+var WORKER_PY = join3(__dirname, "cad_worker.py");
+var SECCOMP_FILTER_PATH = join3(__dirname, "..", "worker", "seccomp_filter.bpf");
+var SECCOMP_LOADER_PATH = join3(__dirname, "..", "worker", "seccomp_load.py");
 var SANDBOX_ROOT = "/sandbox";
 var SANDBOX_FILTER_PATH = `${SANDBOX_ROOT}/seccomp_filter.bpf`;
 var SANDBOX_LOADER_PATH = `${SANDBOX_ROOT}/seccomp_load.py`;
 var SANDBOX_WORKER_PATH = `${SANDBOX_ROOT}/cad_worker.py`;
-var PREEXEC_PATH = join2(__dirname, "..", "worker", "cad_preexec");
+var PREEXEC_PATH = join3(__dirname, "..", "worker", "cad_preexec");
 function defaultRlimits(timeoutSeconds) {
   return {
     asBytes: 2 * 1024 ** 3,
@@ -8076,7 +8266,7 @@ function selectSpawnMode(env = process.env, platform = process.platform) {
 var SHA256_HEX_LEN = 64;
 var SHA256_HEX_RE = /^[0-9a-f]{64}$/i;
 function readSidecarSha(name) {
-  const sidecarPath = join2(__dirname, "..", "dist", `${name}.sha256`);
+  const sidecarPath = join3(__dirname, "..", "dist", `${name}.sha256`);
   if (!existsSync(sidecarPath)) return void 0;
   const raw = readFileSync(sidecarPath, "utf8").trim();
   return SHA256_HEX_RE.test(raw) ? raw.toLowerCase() : void 0;
@@ -8266,7 +8456,7 @@ async function invokeWorker(job, timeoutSeconds, decision = selectSpawnMode(), p
     pythonBin,
     rlimits
   });
-  return new Promise((resolve) => {
+  return new Promise((resolve2) => {
     const child = spawn(invocation.command, invocation.args, {
       stdio: invocation.stdio,
       env: invocation.env
@@ -8279,7 +8469,7 @@ async function invokeWorker(job, timeoutSeconds, decision = selectSpawnMode(), p
       if (settled) return;
       settled = true;
       if (killTimer !== null) clearTimeout(killTimer);
-      resolve(result);
+      resolve2(result);
     };
     const overheadMs = decision.mode === "bwrap+seccomp" ? BWRAP_OVERHEAD_GRACE_MS : 0;
     killTimer = setTimeout(() => {
@@ -8289,7 +8479,7 @@ async function invokeWorker(job, timeoutSeconds, decision = selectSpawnMode(), p
         child.kill("SIGKILL");
       } catch {
       }
-      resolve({
+      resolve2({
         ok: false,
         error: "worker_timeout",
         message: `CAD script timed out after ${timeoutSeconds}s`
@@ -8373,12 +8563,13 @@ async function invokeWorker(job, timeoutSeconds, decision = selectSpawnMode(), p
     }
   });
 }
-async function renderCadQuery(script, format, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS, decision = selectSpawnMode()) {
+async function renderCadQuery(script, format, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS, decision = selectSpawnMode(), inputFiles) {
   const effectiveTimeout = Math.min(
     Math.max(1, timeoutSeconds),
     MAX_TIMEOUT_SECONDS
   );
-  const workdir = await mkdtemp(join2(tmpdir2(), "cad-worker-"));
+  const workdir = await mkdtemp(join3(tmpdir2(), "cad-worker-"));
+  if (inputFiles?.length) await stageInputFiles(workdir, inputFiles);
   return invokeWorker({ script, format, workdir }, effectiveTimeout, decision);
 }
 
@@ -8386,6 +8577,24 @@ async function renderCadQuery(script, format, timeoutSeconds = DEFAULT_TIMEOUT_S
 var DEFAULT_ARTIFACT_REPO_URL = "https://github.com/claudegoogl-sudo/cad-artifacts.git";
 var DEFAULT_ARTIFACT_BRANCH = "main";
 var artifactStagingMap = /* @__PURE__ */ new Map();
+var MAX_RETAINED_INPUT_BYTES = 2 * MAX_TOTAL_INPUT_BYTES;
+function entryInputBytes(entry) {
+  let n = 0;
+  for (const f of entry.inputs ?? []) n += f.bytes.byteLength;
+  return n;
+}
+function enforceRetainedInputCap(map = artifactStagingMap, cap = MAX_RETAINED_INPUT_BYTES) {
+  let total = 0;
+  for (const entry of map.values()) total += entryInputBytes(entry);
+  if (total <= cap) return;
+  for (const entry of map.values()) {
+    if (total <= cap) break;
+    const freed = entryInputBytes(entry);
+    if (freed === 0) continue;
+    entry.inputs = void 0;
+    total -= freed;
+  }
+}
 function stagingMapKey(companyId, agentId, artifactId) {
   return `${companyId}:${agentId}:${artifactId}`;
 }
@@ -8444,17 +8653,17 @@ function validateFilename(value) {
   return null;
 }
 function assertSafeRepoPath(repoPath) {
-  const normalized = path2.posix.normalize(repoPath);
+  const normalized = path3.posix.normalize(repoPath);
   if (normalized !== repoPath) return "internal: repoPath would normalize differently (path traversal blocked)";
   if (!normalized.startsWith("artifacts/")) return "internal: repoPath must start with 'artifacts/'";
   return null;
 }
-function encodeRepoPathForUrl(repoPath) {
+function encodeRepoPathForUrl2(repoPath) {
   return repoPath.split("/").map(encodeURIComponent).join("/");
 }
-var FETCH_TIMEOUT_MS = 3e4;
+var FETCH_TIMEOUT_MS2 = 3e4;
 function fetchSignal() {
-  return AbortSignal.timeout(FETCH_TIMEOUT_MS);
+  return AbortSignal.timeout(FETCH_TIMEOUT_MS2);
 }
 function githubHeaders(pat) {
   return {
@@ -8465,7 +8674,7 @@ function githubHeaders(pat) {
     "User-Agent": "paperclip-plugin-cad/0.1.0"
   };
 }
-function parseGitHubUrl(repoUrl) {
+function parseGitHubUrl2(repoUrl) {
   let u;
   try {
     u = new URL(repoUrl);
@@ -8485,7 +8694,7 @@ function parseGitHubUrl(repoUrl) {
   return [segs[0], segs[1]];
 }
 async function checkRepoPrerequisite(pat, repoUrl) {
-  const [owner, repo] = parseGitHubUrl(repoUrl);
+  const [owner, repo] = parseGitHubUrl2(repoUrl);
   const headers = githubHeaders(pat);
   let resp;
   try {
@@ -8517,12 +8726,12 @@ async function checkRepoPrerequisite(pat, repoUrl) {
 async function checkArtifactExists(pat, repoUrl, repoPath) {
   let owner, repo;
   try {
-    [owner, repo] = parseGitHubUrl(repoUrl);
+    [owner, repo] = parseGitHubUrl2(repoUrl);
   } catch {
     return null;
   }
   const headers = githubHeaders(pat);
-  const encodedPath = encodeRepoPathForUrl(repoPath);
+  const encodedPath = encodeRepoPathForUrl2(repoPath);
   const ownerEnc = encodeURIComponent(owner);
   const repoEnc = encodeURIComponent(repo);
   let contentsResp;
@@ -8554,10 +8763,10 @@ async function checkArtifactExists(pat, repoUrl, repoPath) {
   };
 }
 async function pushArtifactToGitHub(pat, repoUrl, branch, localFile, repoPath, message) {
-  const [owner, repo] = parseGitHubUrl(repoUrl);
+  const [owner, repo] = parseGitHubUrl2(repoUrl);
   const { readFile } = await import("node:fs/promises");
   const contentBase64 = (await readFile(localFile)).toString("base64");
-  const encodedPath = encodeRepoPathForUrl(repoPath);
+  const encodedPath = encodeRepoPathForUrl2(repoPath);
   const apiBase = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodedPath}`;
   const headers = githubHeaders(pat);
   let existingSha;
@@ -8593,14 +8802,14 @@ async function pushArtifactToGitHub(pat, repoUrl, branch, localFile, repoPath, m
   const commitSha = result.commit?.sha ?? "";
   return { commitSha, permalink: `https://github.com/${owner}/${repo}/blob/${commitSha}/${repoPath}` };
 }
-async function renderCadScript(script, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
-  const result = await renderCadQuery(script, "step", timeoutSeconds);
+async function renderCadScript(script, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS, inputFiles) {
+  const result = await renderCadQuery(script, "step", timeoutSeconds, void 0, inputFiles);
   if (!result.ok) throw new Error(`[${result.error}] ${result.message}`);
   return result.artifactPath;
 }
 async function exportToFormat(entry, format) {
   if (format === "step") return entry.stepPath;
-  const result = await renderCadQuery(entry.script, format, DEFAULT_TIMEOUT_SECONDS);
+  const result = await renderCadQuery(entry.script, format, DEFAULT_TIMEOUT_SECONDS, void 0, entry.inputs);
   if (!result.ok) throw new Error(`[${result.error}] Export to ${format} failed: ${result.message}`);
   return result.artifactPath;
 }
@@ -8617,7 +8826,23 @@ var plugin = definePlugin({
           type: "object",
           properties: {
             script: { type: "string", description: "CadQuery Python script." },
-            timeout: { type: "integer", minimum: 1, maximum: 300, description: "Timeout (seconds, default 30)." }
+            timeout: { type: "integer", minimum: 1, maximum: 300, description: "Timeout (seconds, default 30)." },
+            inputArtifacts: {
+              type: "array",
+              maxItems: MAX_INPUT_FILES,
+              items: {
+                type: "object",
+                properties: {
+                  repoPath: {
+                    type: "string",
+                    description: "Path of an uploaded scan in the cad-artifacts repo (under user-uploads/ or artifacts/). Fetched by the host and staged into the sandbox at inputs/<basename>; read it via StlAPI_Reader('inputs/<basename>')."
+                  }
+                },
+                required: ["repoPath"],
+                additionalProperties: false
+              },
+              description: "Optional scan/mesh files to stage into the sandbox before the script runs (PLA-1089). Per-file 50 MiB cap, 120 MiB total, max 3 files."
+            }
           },
           required: ["script"],
           additionalProperties: false
@@ -8658,10 +8883,43 @@ var plugin = definePlugin({
           logCompletion(ctx, tool, runCtx, ms2, "error");
           return validationError("missing tenant context (companyId/agentId) on runCtx");
         }
-        ctx.logger.info("cad.run_script: rendering", { scriptLength: script.length, timeoutSeconds });
+        let inputFiles = [];
+        const parsedInputs = parseInputArtifacts(p.inputArtifacts);
+        if ("error" in parsedInputs) {
+          const ms2 = Date.now() - t0;
+          await emitMetrics(anyCtx, tool, ms2, true);
+          logCompletion(ctx, tool, runCtx, ms2, "error");
+          return validationError(parsedInputs.error);
+        }
+        if (parsedInputs.repoPaths.length > 0) {
+          const config = await ctx.config.get();
+          if (!config.githubPatSecretId) {
+            const ms2 = Date.now() - t0;
+            await emitMetrics(anyCtx, tool, ms2, true);
+            logCompletion(ctx, tool, runCtx, ms2, "error");
+            return { data: { error: "prerequisite_missing", message: "inputArtifacts requires githubPatSecretId to be configured." } };
+          }
+          const repoUrl = config.artifactRepoUrl ?? DEFAULT_ARTIFACT_REPO_URL;
+          const branch = config.artifactRepoBranch ?? DEFAULT_ARTIFACT_BRANCH;
+          ctx.logger.info("cad.run_script: fetching inputArtifacts", { count: parsedInputs.repoPaths.length });
+          const pat = await ctx.secrets.resolve(config.githubPatSecretId);
+          try {
+            inputFiles = await fetchInputArtifacts(pat, repoUrl, branch, parsedInputs.repoPaths);
+          } catch (err) {
+            if (err instanceof IntakeError) {
+              ctx.logger.warn("cad.run_script: intake fetch failed", { kind: err.kind, httpStatus: err.httpStatus });
+              const ms2 = Date.now() - t0;
+              await emitMetrics(anyCtx, tool, ms2, true);
+              logCompletion(ctx, tool, runCtx, ms2, "error");
+              return { data: { error: err.kind, message: err.message } };
+            }
+            throw err;
+          }
+        }
+        ctx.logger.info("cad.run_script: rendering", { scriptLength: script.length, timeoutSeconds, inputCount: inputFiles.length });
         let stepPath;
         try {
-          stepPath = await renderCadScript(script, timeoutSeconds);
+          stepPath = await renderCadScript(script, timeoutSeconds, inputFiles);
         } catch (err) {
           const msg = err instanceof Error ? err.message : "Unknown worker error";
           ctx.logger.warn("cad.run_script: worker error", { error: msg });
@@ -8673,8 +8931,9 @@ var plugin = definePlugin({
         const artifactId = `cad-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         artifactStagingMap.set(
           stagingMapKey(runCtx.companyId, runCtx.agentId, artifactId),
-          { script, stepPath }
+          { script, stepPath, inputs: inputFiles.length > 0 ? inputFiles : void 0 }
         );
+        enforceRetainedInputCap();
         ctx.logger.info("cad.run_script: staged", { artifactId });
         const ms = Date.now() - t0;
         await emitMetrics(anyCtx, tool, ms, false);
@@ -8919,6 +9178,8 @@ var plugin = definePlugin({
 var worker_default = plugin;
 runWorker(plugin, import.meta.url);
 export {
-  worker_default as default
+  MAX_RETAINED_INPUT_BYTES,
+  worker_default as default,
+  enforceRetainedInputCap
 };
 //# sourceMappingURL=worker.js.map

@@ -41,6 +41,16 @@ import {
   DEFAULT_TIMEOUT_SECONDS as WORKER_DEFAULT_TIMEOUT,
 } from "./cad-worker-client.js";
 
+// PLA-1089 Ask 1: host-mediated scan intake-fetch.
+import {
+  parseInputArtifacts,
+  fetchInputArtifacts,
+  IntakeError,
+  MAX_INPUT_FILES,
+  MAX_TOTAL_INPUT_BYTES,
+  type InputFile,
+} from "./cad-intake.js";
+
 // ---------------------------------------------------------------------------
 // Config shape
 // ---------------------------------------------------------------------------
@@ -68,12 +78,51 @@ const DEFAULT_ARTIFACT_BRANCH = "main";
 // the same "not found" error path as missing entries (no oracle).
 // ---------------------------------------------------------------------------
 
-interface StagingEntry {
+export interface StagingEntry {
   script: string;
   stepPath: string;
+  // PLA-1089 Ask 1: scan inputs fetched at run_script time, retained so a later
+  // cad.export (which re-runs the script for non-step formats) can re-stage them.
+  // Tenant-scoped via the staging-map key, same as the rest of the entry.
+  inputs?: InputFile[];
 }
 
 const artifactStagingMap = new Map<string, StagingEntry>();
+
+// PLA-1089 SE-2: the staging map lives in the long-lived, tenant-shared Node
+// plugin-worker process (outside the python RLIMIT_AS), and each entry can now
+// retain up to MAX_TOTAL_INPUT_BYTES of fetched scan bytes for cad.export
+// re-render. Without a bound, a loop of run_script calls with large inputs grows
+// host RSS until the shared worker OOMs — a cross-tenant DoS. Cap the *total*
+// retained input bytes across the whole map and evict oldest-first. The map
+// iterates in insertion order, so the just-inserted (newest) entry is evicted
+// last; a single entry is <= MAX_TOTAL_INPUT_BYTES < the cap, so the active call
+// is never stripped of its own inputs. Evicting only drops `.inputs` (a later
+// cad.export degrades to a no-input re-render, failing closed) while leaving the
+// tiny script/stepPath entry intact for step-format exports.
+export const MAX_RETAINED_INPUT_BYTES = 2 * MAX_TOTAL_INPUT_BYTES; // 240 MiB
+
+function entryInputBytes(entry: StagingEntry): number {
+  let n = 0;
+  for (const f of entry.inputs ?? []) n += f.bytes.byteLength;
+  return n;
+}
+
+export function enforceRetainedInputCap(
+  map: Map<string, StagingEntry> = artifactStagingMap,
+  cap: number = MAX_RETAINED_INPUT_BYTES,
+): void {
+  let total = 0;
+  for (const entry of map.values()) total += entryInputBytes(entry);
+  if (total <= cap) return;
+  for (const entry of map.values()) {
+    if (total <= cap) break;
+    const freed = entryInputBytes(entry);
+    if (freed === 0) continue;
+    entry.inputs = undefined;
+    total -= freed;
+  }
+}
 
 function stagingMapKey(companyId: string, agentId: string, artifactId: string): string {
   return `${companyId}:${agentId}:${artifactId}`;
@@ -362,8 +411,12 @@ async function pushArtifactToGitHub(
 // CadQuery render helpers
 // ---------------------------------------------------------------------------
 
-async function renderCadScript(script: string, timeoutSeconds = WORKER_DEFAULT_TIMEOUT): Promise<string> {
-  const result = await renderCadQuery(script, "step", timeoutSeconds);
+async function renderCadScript(
+  script: string,
+  timeoutSeconds = WORKER_DEFAULT_TIMEOUT,
+  inputFiles?: InputFile[],
+): Promise<string> {
+  const result = await renderCadQuery(script, "step", timeoutSeconds, undefined, inputFiles);
   if (!result.ok) throw new Error(`[${result.error}] ${result.message}`);
   return result.artifactPath;
 }
@@ -373,7 +426,9 @@ async function exportToFormat(
   format: "step" | "stl" | "3mf" | "dxf" | "svg",
 ): Promise<string> {
   if (format === "step") return entry.stepPath;
-  const result = await renderCadQuery(entry.script, format, WORKER_DEFAULT_TIMEOUT);
+  // Re-runs the script — re-stage the same scan inputs so input-dependent scripts
+  // (e.g. StlAPI_Reader("inputs/scan.stl")) export correctly (PLA-1089 Ask 1).
+  const result = await renderCadQuery(entry.script, format, WORKER_DEFAULT_TIMEOUT, undefined, entry.inputs);
   if (!result.ok) throw new Error(`[${result.error}] Export to ${format} failed: ${result.message}`);
   return result.artifactPath;
 }
@@ -405,6 +460,26 @@ const plugin = definePlugin({
           properties: {
             script: { type: "string", description: "CadQuery Python script." },
             timeout: { type: "integer", minimum: 1, maximum: 300, description: "Timeout (seconds, default 30)." },
+            inputArtifacts: {
+              type: "array",
+              maxItems: MAX_INPUT_FILES,
+              items: {
+                type: "object",
+                properties: {
+                  repoPath: {
+                    type: "string",
+                    description:
+                      "Path of an uploaded scan in the cad-artifacts repo (under user-uploads/ or artifacts/). " +
+                      "Fetched by the host and staged into the sandbox at inputs/<basename>; read it via StlAPI_Reader('inputs/<basename>').",
+                  },
+                },
+                required: ["repoPath"],
+                additionalProperties: false,
+              },
+              description:
+                "Optional scan/mesh files to stage into the sandbox before the script runs (PLA-1089). " +
+                "Per-file 50 MiB cap, 120 MiB total, max 3 files.",
+            },
           },
           required: ["script"],
           additionalProperties: false,
@@ -453,11 +528,49 @@ const plugin = definePlugin({
           return validationError("missing tenant context (companyId/agentId) on runCtx");
         }
 
-        ctx.logger.info("cad.run_script: rendering", { scriptLength: script.length, timeoutSeconds });
+        // PLA-1089 Ask 1: host-mediated scan intake. Validate the inputArtifacts
+        // array + per-path allowlist + count cap, then fetch each file with the
+        // export PAT (binary-safe, size-capped) BEFORE rendering. Any failure is
+        // a structured tool error — never silent, never a partial input set.
+        let inputFiles: InputFile[] = [];
+        const parsedInputs = parseInputArtifacts(p.inputArtifacts);
+        if ("error" in parsedInputs) {
+          const ms = Date.now() - t0;
+          await emitMetrics(anyCtx, tool, ms, true);
+          logCompletion(ctx, tool, runCtx, ms, "error");
+          return validationError(parsedInputs.error);
+        }
+        if (parsedInputs.repoPaths.length > 0) {
+          const config = (await ctx.config.get()) as unknown as CadPluginConfig;
+          if (!config.githubPatSecretId) {
+            const ms = Date.now() - t0;
+            await emitMetrics(anyCtx, tool, ms, true);
+            logCompletion(ctx, tool, runCtx, ms, "error");
+            return { data: { error: "prerequisite_missing", message: "inputArtifacts requires githubPatSecretId to be configured." } };
+          }
+          const repoUrl = config.artifactRepoUrl ?? DEFAULT_ARTIFACT_REPO_URL;
+          const branch = config.artifactRepoBranch ?? DEFAULT_ARTIFACT_BRANCH;
+          ctx.logger.info("cad.run_script: fetching inputArtifacts", { count: parsedInputs.repoPaths.length });
+          const pat = await ctx.secrets.resolve(config.githubPatSecretId);
+          try {
+            inputFiles = await fetchInputArtifacts(pat, repoUrl, branch, parsedInputs.repoPaths);
+          } catch (err) {
+            if (err instanceof IntakeError) {
+              ctx.logger.warn("cad.run_script: intake fetch failed", { kind: err.kind, httpStatus: err.httpStatus });
+              const ms = Date.now() - t0;
+              await emitMetrics(anyCtx, tool, ms, true);
+              logCompletion(ctx, tool, runCtx, ms, "error");
+              return { data: { error: err.kind, message: err.message } };
+            }
+            throw err;
+          }
+        }
+
+        ctx.logger.info("cad.run_script: rendering", { scriptLength: script.length, timeoutSeconds, inputCount: inputFiles.length });
 
         let stepPath: string;
         try {
-          stepPath = await renderCadScript(script, timeoutSeconds);
+          stepPath = await renderCadScript(script, timeoutSeconds, inputFiles);
         } catch (err) {
           const msg = err instanceof Error ? err.message : "Unknown worker error";
           ctx.logger.warn("cad.run_script: worker error", { error: msg });
@@ -471,8 +584,10 @@ const plugin = definePlugin({
         // PLA-80 (F6): key by tuple sourced from runCtx, never from agent input.
         artifactStagingMap.set(
           stagingMapKey(runCtx.companyId, runCtx.agentId, artifactId),
-          { script, stepPath },
+          { script, stepPath, inputs: inputFiles.length > 0 ? inputFiles : undefined },
         );
+        // PLA-1089 SE-2: bound total retained input bytes across the shared map.
+        enforceRetainedInputCap();
         ctx.logger.info("cad.run_script: staged", { artifactId });
 
         const ms = Date.now() - t0;

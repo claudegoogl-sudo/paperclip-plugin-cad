@@ -4,6 +4,43 @@ Tracker: [PLA-32](/PLA/issues/PLA-32)
 
 ---
 
+## v0.1.9 — 2026-06-15
+
+### Added
+
+- **Host-mediated scan intake for `cad.run_script`
+  ([PLA-1089](/PLA/issues/PLA-1089) Ask 1).** New optional `inputArtifacts:
+  [{ repoPath }]` param. The host fetches each `repoPath` from the
+  cad-artifacts repo with the already-configured export PAT (GitHub Contents
+  API, `Accept: application/vnd.github.raw` for binary-safe bytes), enforces a
+  dedicated path allowlist (`user-uploads/`, `artifacts/` — traversal /
+  absolute / out-of-allowlist rejected with a structured error), per-file
+  (50 MiB) + total (120 MiB) + count (3) caps, and stages each file by
+  basename into the sandbox workdir at `inputs/<basename>`. Scripts read the
+  scan via `StlAPI_Reader("inputs/<basename>")` (OCC C-level `fopen`, which the
+  worker's `open()` confinement does not block). See `src/cad-intake.ts`.
+
+- **Mesh-boolean tooling in the worker ([PLA-1089](/PLA/issues/PLA-1089)
+  Ask 2).** Pinned `trimesh==4.12.2` + `manifold3d==3.5.1` in
+  `worker/requirements-cad.txt` for faceted-solid repair / clearance-offset /
+  exact boolean (OCC `BRepOffsetAPI_MakeOffsetShape` is unusable on
+  scan-derived faceted solids). Both import and run a boolean subtract clean
+  under the live bwrap+seccomp filter. `cad_worker.py` pre-imports the stack
+  before lockdown (so a user-script `import trimesh` is a cache hit, not a
+  re-exec that trips the blocked `subprocess` import) and scrubs the
+  `subprocess` shell-out global on every trimesh submodule that holds one
+  (`interfaces.generic`, `exchange.ply`, `exchange.binvox`) plus `os` on the
+  interface modules, so a pre-imported trimesh cannot be used as a shell-out
+  escape gadget. The in-process manifold3d engine needs none of them.
+
+### Notes
+
+- `scipy==1.17.1` imports cleanly under the live seccomp filter with the pinned
+  `numpy==2.4.4`; a deploy-host scipy `ImportError` is a stale-venv /
+  `--no-deps` install gap (scipy's sole runtime dep is numpy, already pinned),
+  not a sandbox block. Remediation is re-running
+  `pip install --no-deps -r worker/requirements-cad.txt` on the worker host.
+
 ## v0.1.8 — 2026-06-01
 
 ### Fixed

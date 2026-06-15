@@ -61,6 +61,7 @@ import {
   SECCOMP_FILTER_SHA256_PIN,
   SECCOMP_LOADER_SHA256_PIN,
 } from "./manifest.js";
+import { stageInputFiles, type InputFile } from "./cad-intake.js";
 
 // Re-export shared types and error classes from the stub so callers import from
 // one place regardless of which implementation is active.
@@ -838,6 +839,7 @@ export async function renderCadQuery(
   format: ExportFormat,
   timeoutSeconds: number = DEFAULT_TIMEOUT_SECONDS,
   decision: SpawnModeDecision = selectSpawnMode(),
+  inputFiles?: InputFile[],
 ): Promise<WorkerResult> {
   const effectiveTimeout = Math.min(
     Math.max(1, timeoutSeconds),
@@ -845,6 +847,10 @@ export async function renderCadQuery(
   );
 
   const workdir = await mkdtemp(join(tmpdir(), "cad-worker-"));
+  // PLA-1089 Ask 1: stage host-fetched scan inputs into <workdir>/inputs/<basename>
+  // BEFORE the sandbox spawn. The workdir is `--bind`+`--chdir`'d into the
+  // sandbox, so the script reads them via OCC's StlAPI_Reader("inputs/<name>").
+  if (inputFiles?.length) await stageInputFiles(workdir, inputFiles);
   return invokeWorker({ script, format, workdir }, effectiveTimeout, decision);
 }
 

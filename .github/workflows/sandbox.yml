@@ -409,3 +409,46 @@ jobs:
 
       - name: Run perf tests (PLA-106 §6.2 gates)
         run: npx vitest run --config ./vitest.config.ts src/sandbox.bwrap.perf.test.ts
+
+      - name: Run mesh-boolean sandbox-compat suite (PLA-1089 Ask 2 / PLA-1090 SE-3)
+        # PLA-1090 SE-3: the BLOCKING "native mesh code is sandbox-safe / no
+        # SIGSYS / no filter widening" sign-off is worthless if the proving test
+        # silently skips. worker/requirements-cad.txt (incl. trimesh, manifold3d,
+        # scipy) is installed into /usr/bin/python3 above — the sandbox-visible
+        # path — so the in-sandbox import probe MUST succeed here. The test throws
+        # in beforeAll when (CI && bwrap && !mesh-importable), so a silent skip
+        # cannot pass this gate; the two `mesh-boolean under bwrap+seccomp` cases
+        # execute non-skipped. Tee the output so the failure tail surfaces through
+        # the public, unauthenticated comments API (no actions:read needed).
+        run: |
+          set -o pipefail
+          npx vitest run --config ./vitest.config.ts src/worker.mesh-boolean.test.ts 2>&1 | tee evidence/mesh-boolean.log
+
+      - name: Post mesh-boolean tail on failure (diagnostic surface)
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = 'evidence/mesh-boolean.log';
+            let body;
+            if (!fs.existsSync(path)) {
+              body = `## CI mesh-boolean sandbox-compat failure — log not captured\n\n` +
+                `Commit: \`${context.sha}\`\nRun: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            } else {
+              const log = fs.readFileSync(path, 'utf8');
+              // Last ~12kb captures vitest's failure summary plus the beforeAll
+              // SE-3 throw message (which names whether it was an ImportError vs a
+              // kernel SIGSYS kill).
+              const tail = log.length > 12000 ? log.slice(-12000) : log;
+              body = `## CI mesh-boolean sandbox-compat failure — diagnostic dump\n\n` +
+                `Commit: \`${context.sha}\`\nRun: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n\n` +
+                `<details><summary>vitest tail (last 12kb)</summary>\n\n` +
+                "```\n" + tail + "\n```\n\n</details>";
+            }
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body,
+            });

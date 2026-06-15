@@ -162,6 +162,30 @@ const manifest: ManifestWithRuntimeRequirements = {
               "Execution timeout in seconds (1–300, default: 30). " +
               "Enforced by the CAD worker (sub-goal 2); stub accepts but ignores.",
           },
+          // PLA-1089 Ask 1 — host-mediated scan intake. The host fetches each
+          // repoPath from the cad-artifacts repo with the export PAT and stages
+          // it into the sandbox at inputs/<basename>; the script reads it via
+          // StlAPI_Reader("inputs/<basename>"). Path allowlist (user-uploads/,
+          // artifacts/), per-file 50 MiB + 120 MiB total + max-3 caps enforced
+          // host-side in worker.ts (see cad-intake.ts).
+          inputArtifacts: {
+            type: "array",
+            maxItems: 3,
+            items: {
+              type: "object",
+              properties: {
+                repoPath: {
+                  type: "string",
+                  description:
+                    "Path of an uploaded scan in the cad-artifacts repo (under user-uploads/ or artifacts/).",
+                },
+              },
+              required: ["repoPath"],
+              additionalProperties: false,
+            },
+            description:
+              "Optional scan/mesh files staged into the sandbox before the script runs (PLA-1089).",
+          },
         },
         required: ["script"],
         additionalProperties: false,
