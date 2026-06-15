@@ -1,10 +1,10 @@
 // src/manifest.ts
-var SECCOMP_FILTER_SHA256_PIN = "6bdbbc4fdfb3d80996c66a812df450c95043a86364fe8955651ec867859617ba";
+var SECCOMP_FILTER_SHA256_PIN = "__PLA114_SECCOMP_FILTER_SHA256__";
 var SECCOMP_LOADER_SHA256_PIN = "0fc1b58d38895fb2dc7be1464b1230344530aa7f168af9478fa47153e20f8be0";
 var manifest = {
   id: "platform.cad",
   apiVersion: 1,
-  version: "0.1.9",
+  version: "0.1.10",
   displayName: "CAD (CadQuery)",
   description: "Lets agents design and export 3D CAD models via CadQuery tool calls. v0.1.0 surface: cad.run_script (execute Python \u2192 staged artifact) and cad.export (staged artifact \u2192 GitHub commit + permalink). Operator-confirmed via approval f420bc31.",
   author: "Platform",
@@ -39,7 +39,7 @@ var manifest = {
   // the filter blob unchanged.
   worker: {
     seccompFilterPath: "./worker/seccomp_filter.bpf",
-    seccompFilterSha256: "6bdbbc4fdfb3d80996c66a812df450c95043a86364fe8955651ec867859617ba",
+    seccompFilterSha256: "__PLA114_SECCOMP_FILTER_SHA256__",
     seccompLoaderPath: "./worker/seccomp_load.py",
     seccompLoaderSha256: "0fc1b58d38895fb2dc7be1464b1230344530aa7f168af9478fa47153e20f8be0"
   },
