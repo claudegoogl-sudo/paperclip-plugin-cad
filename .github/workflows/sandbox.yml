@@ -455,21 +455,21 @@ jobs:
               body,
             });
 
-      - name: Capture dev_direct perf baseline (PLA-114 §6.2 — writes perf-baseline.json)
+      - name: Run perf gates interleaved (PLA-106/PLA-114 §6.2/§6.3, PLA-1097)
         # PLA-1097: the §6.2 perf gate measures the bwrap+seccomp cold-start
-        # *adder* (overhead vs a dev_direct baseline, ≤100 ms p95) — a
-        # runner-variance-robust relative gate, because the dominant ~2 s
-        # CadQuery import is in both measurements and cancels in the diff. The
-        # perf test (src/sandbox.bwrap.perf.test.ts, docstring lines 18-22 +
-        # 167-176) is DESIGNED for CI to do both runs back-to-back: this run sets
-        # CAD_WORKER_PERF_BASELINE=1 to capture the dev_direct baseline (the
-        # bwrap gate self-skips under that env), then the gate run below reads it.
-        # Without this step the gate fell back to a hard absolute 2000 ms ceiling
-        # that GH shared runners legitimately exceed (~2050-2090 ms), failing
-        # every run regardless of code — a pre-existing CI miscalibration, not a
-        # regression. Capturing the baseline on the SAME runner restores the
-        # spec-intended relative gate.
-        run: CAD_WORKER_UNSAFE_DEV=1 CAD_WORKER_PERF_BASELINE=1 npx vitest run --config ./vitest.config.ts src/sandbox.bwrap.perf.test.ts
-
-      - name: Run perf tests (PLA-106 §6.2 gates)
-        run: npx vitest run --config ./vitest.config.ts src/sandbox.bwrap.perf.test.ts
+        # *adder* vs a dev_direct baseline (p95 ≤100 ms, p99 ≤200 ms, steady-
+        # state median within ±5%). The dominant ~2 s CadQuery import is in both
+        # measurements and cancels in the diff, so the gate is robust to the
+        # absolute runner envelope.
+        #
+        # Previously the baseline and the bwrap samples ran as TWO separate
+        # steps minutes apart. On a shared GH runner the median drifted ±2-3%
+        # between them, which inflated the p50 ratio past ±5% even though the
+        # absolute p95/p99 adders stayed within ceilings (observed: p95 adder
+        # 90 ms but p50 ratio 1.063 — the per-percentile adders were mutually
+        # inconsistent, the signature of cross-run drift). Setting
+        # CAD_WORKER_PERF_INTERLEAVE=1 captures BOTH modes in ONE process,
+        # interleaved sample-for-sample, so runner CPU drift hits both equally
+        # and cancels in the per-percentile diff. The seccomp/bwrap production
+        # spawn path is unchanged — this only changes how the gate samples.
+        run: CAD_WORKER_PERF_INTERLEAVE=1 npx vitest run --config ./vitest.config.ts src/sandbox.bwrap.perf.test.ts
