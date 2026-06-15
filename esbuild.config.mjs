@@ -56,9 +56,37 @@ const sharedOptions = {
   platform: "node",
   target: "node20",
   format: "esm",
-  packages: "external",
   sourcemap: true,
   define: versionDefine,
+};
+
+// Manifest entry — src/manifest.ts imports the SDK type-only
+// (`import type { PaperclipPluginManifestV1 }`), which esbuild erases, so the
+// emitted dist/manifest.js carries no runtime SDK import. We keep the blanket
+// `packages: "external"` here to preserve prior manifest output byte-for-byte.
+const manifestOptions = {
+  ...sharedOptions,
+  packages: "external",
+  entryPoints: { manifest: "src/manifest.ts" },
+  outdir: "dist",
+};
+
+// Worker entry (PLA-748) — bundle @paperclipai/plugin-sdk, the worker's only
+// third-party runtime dependency, INTO dist/worker.js. The host's
+// `plugin install -l <dir>` registers a package directory as-is and does NOT
+// run `npm install`, so a bare-extracted release tarball has no
+// node_modules/@paperclipai/plugin-sdk and a bare external import dies on
+// activation with ERR_MODULE_NOT_FOUND (the v525 CAD outage, PLA-639; live
+// 0.1.6 only survives via a manual `npm install --omit=dev` hotfix). We
+// therefore omit `packages: "external"` for the worker: Node builtins stay
+// external automatically because platform:"node", while the SDK (and its
+// transitive deps) is inlined. Mirrors klipper's worker preset, whose only
+// externals are react/react-dom — neither of which CAD imports. The
+// `check:release-tarball` self-contained gate regresses CI if this is undone.
+const workerOptions = {
+  ...sharedOptions,
+  entryPoints: { worker: "src/worker.ts" },
+  outdir: "dist",
 };
 
 /**
@@ -102,21 +130,15 @@ function computeSeccompLoaderSha256() {
 }
 
 async function build() {
-  const ctx = await esbuild.context({
-    ...sharedOptions,
-    entryPoints: {
-      manifest: "src/manifest.ts",
-      worker: "src/worker.ts",
-    },
-    outdir: "dist",
-  });
+  const manifestCtx = await esbuild.context(manifestOptions);
+  const workerCtx = await esbuild.context(workerOptions);
 
   if (watch) {
-    await ctx.watch();
+    await Promise.all([manifestCtx.watch(), workerCtx.watch()]);
     console.log("Watching for changes...");
   } else {
-    await ctx.rebuild();
-    await ctx.dispose();
+    await Promise.all([manifestCtx.rebuild(), workerCtx.rebuild()]);
+    await Promise.all([manifestCtx.dispose(), workerCtx.dispose()]);
 
     // PLA-114: substitute the seccomp filter digest AND the loader-shim
     // digest into the bundled manifest (and into sidecars) so the host's

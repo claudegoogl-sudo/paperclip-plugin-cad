@@ -138,6 +138,53 @@ function checkRequired(entries, required) {
 }
 
 /**
+ * PLA-748 — self-contained-bundle gate.
+ *
+ * The host's `plugin install -l <dir>` registers an extracted tarball as-is
+ * and does NOT run `npm install`, so a bare-extracted package has no
+ * `node_modules/`. CAD's worker therefore MUST bundle its only third-party
+ * runtime dependency (`@paperclipai/plugin-sdk`, plus its transitive
+ * `@paperclipai/shared`) into `dist/worker.js` — an un-bundled (`packages:
+ * "external"`) build emits a top-level `import … from "@paperclipai/…"` that
+ * dies on activation with ERR_MODULE_NOT_FOUND (the v525 CAD outage, PLA-639).
+ *
+ * `esbuild` inlines bundled modules under `// node_modules/@paperclipai/…`
+ * banner comments (not import statements), so we scan only for the
+ * *unresolved external import/require forms*. Any hit means the SDK leaked
+ * back out as external and the tarball is NOT self-contained — fail the gate
+ * so a future un-bundling regresses CI.
+ */
+function findBareSdkImports(workerSource) {
+  const patterns = [
+    /\bfrom\s*["'](@paperclipai\/[^"']+)["']/g, // import/export … from "@paperclipai/…"
+    /\bimport\s*["'](@paperclipai\/[^"']+)["']/g, // bare `import "@paperclipai/…"`
+    /\brequire\(\s*["'](@paperclipai\/[^"']+)["']\s*\)/g, // CJS interop
+  ];
+  const found = new Set();
+  for (const re of patterns) {
+    let m;
+    while ((m = re.exec(workerSource)) !== null) found.add(m[1]);
+  }
+  return [...found];
+}
+
+/**
+ * Extract a single package-relative file's contents from the tarball without
+ * unpacking the whole archive (`tar -xzO package/<rel>` streams to stdout).
+ */
+function readTarballEntry(tarball, packageRelPath) {
+  const result = spawnSync("tar", ["-xzOf", tarball, `package/${packageRelPath}`], {
+    encoding: "utf8",
+  });
+  if (result.status !== 0) {
+    throw new Error(
+      `[release-check] tar -xzO ${packageRelPath} failed (exit ${result.status}): ${result.stderr}`,
+    );
+  }
+  return result.stdout;
+}
+
+/**
  * Self-test: drive `checkRequired` with a synthetic file list to prove
  * the gate fires when a required asset is missing. This is the
  * "intentionally break the file list locally to prove the gate fires"
@@ -163,7 +210,34 @@ function runSelfTest() {
     process.exit(1);
   }
 
-  console.log("[release-check][self-test] OK — gate accepts complete set and rejects missing dist/cad_worker.py.");
+  // PLA-748: prove the self-contained gate accepts a bundled worker (banner
+  // comments only) and rejects an un-bundled one (external import statement).
+  const bundledWorker = [
+    "// node_modules/@paperclipai/plugin-sdk/dist/define-plugin.js",
+    'var x = "uses @paperclipai/plugin-sdk at runtime";',
+    "function defineWorkerPlugin() {}",
+  ].join("\n");
+  const bundledHits = findBareSdkImports(bundledWorker);
+  if (bundledHits.length !== 0) {
+    console.error(
+      `[release-check][self-test] FAIL — bundled worker fixture flagged as external: ${bundledHits.join(", ")}`,
+    );
+    process.exit(1);
+  }
+
+  const externalWorker = 'import { defineWorkerPlugin } from "@paperclipai/plugin-sdk";\n';
+  const externalHits = findBareSdkImports(externalWorker);
+  if (externalHits.length !== 1 || externalHits[0] !== "@paperclipai/plugin-sdk") {
+    console.error(
+      `[release-check][self-test] FAIL — external worker fixture not flagged; got: ${externalHits.join(", ") || "<empty>"}`,
+    );
+    process.exit(1);
+  }
+
+  console.log(
+    "[release-check][self-test] OK — gate accepts complete set, rejects missing dist/cad_worker.py, " +
+      "and the self-contained check accepts a bundled worker while rejecting an external SDK import.",
+  );
 }
 
 function main() {
@@ -176,6 +250,32 @@ function main() {
   const keepTarball = args.includes("--keep");
   const { tarball, entries } = packAndList();
   const missing = checkRequired(entries, REQUIRED_RUNTIME_ASSETS);
+
+  // PLA-748: self-contained-bundle gate. Read the packed worker bundle and
+  // assert the SDK is inlined (no external `@paperclipai/…` import survives),
+  // so the bare-extracted tarball activates with no node_modules/ present.
+  const bareImports = findBareSdkImports(readTarballEntry(tarball, "dist/worker.js"));
+  if (bareImports.length > 0) {
+    console.error(
+      `[release-check] FAIL — tarball ${tarball} is NOT self-contained: ` +
+        `dist/worker.js carries unbundled external import(s):`,
+    );
+    for (const spec of bareImports) console.error(`  - ${spec}`);
+    console.error(
+      `\nThe host's \`plugin install -l\` does not run \`npm install\`, so these ` +
+        `imports die with ERR_MODULE_NOT_FOUND on activation (PLA-639/PLA-748). ` +
+        `Bundle them into dist/worker.js (do NOT mark @paperclipai/* external for ` +
+        `the worker entry in esbuild.config.mjs), then re-run \`npm run check:release-tarball\`.`,
+    );
+    if (!keepTarball && existsSync(tarball)) {
+      try {
+        unlinkSync(tarball);
+      } catch (err) {
+        console.error(`[release-check] (failed to delete tarball: ${err.message})`);
+      }
+    }
+    process.exit(1);
+  }
 
   if (missing.length > 0) {
     console.error(
@@ -198,6 +298,10 @@ function main() {
 
   console.log(`[release-check] OK — tarball ${tarball} contains all required runtime assets:`);
   for (const path of REQUIRED_RUNTIME_ASSETS) console.log(`  package/${path}`);
+  console.log(
+    "[release-check] OK — dist/worker.js is self-contained (no external @paperclipai/* import; " +
+      "activates with no node_modules/ present).",
+  );
   if (!keepTarball && existsSync(tarball)) {
     try {
       unlinkSync(tarball);

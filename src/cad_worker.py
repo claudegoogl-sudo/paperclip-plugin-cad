@@ -251,6 +251,111 @@ class _NetworkBlockedModule(ModuleType):
         )
 
 
+class _BlockedShellout:
+    """
+    Denier sentinel (PLA-1089 Ask 2) that replaces the shell-out globals
+    (`subprocess`, `os`) bound by trimesh's optional `interfaces` submodules.
+
+    trimesh is pre-imported under the real import system (see
+    _preimport_mesh_libs) so a user-script ``import trimesh`` is a cache hit
+    rather than a re-execution that would trip the blocked ``subprocess`` /
+    ``threading`` imports.  Pre-importing, however, leaves
+    ``trimesh.interfaces.generic.subprocess`` reachable as a direct
+    sandbox-escape gadget.  We overwrite those module globals with this
+    sentinel; any attribute access OR call raises.  The manifold3d boolean
+    engine is fully in-process and needs none of these.
+    """
+
+    def __getattr__(self, attr: str) -> Any:
+        raise PermissionError(
+            "[cad-worker] subprocess / shell-out is blocked inside the "
+            "CadQuery sandbox (trimesh interface gadget neutralised)."
+        )
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        raise PermissionError(
+            "[cad-worker] subprocess / shell-out is blocked inside the "
+            "CadQuery sandbox (trimesh interface gadget neutralised)."
+        )
+
+
+_BLOCKED_SHELLOUT = _BlockedShellout()
+
+
+def _preimport_mesh_libs() -> None:
+    """
+    PLA-1089 Ask 2 — pre-import the mesh-boolean stack (trimesh + manifold3d)
+    under the real import system, then neutralise trimesh's shell-out gadgets.
+
+    Why pre-import: once the restricted importer is installed, a user-script
+    ``import trimesh`` re-executes trimesh's __init__, whose ``interfaces`` /
+    ``exchange`` chains import ``subprocess`` (blocked) and fail.  Pre-importing
+    here (mirrors the CadQuery R2 pre-import) caches the module so the
+    user-script import is a no-op cache hit.
+
+    Why scrub: pre-importing leaves a ``subprocess`` module global reachable on
+    every trimesh submodule that shells out to an external binary — verified at
+    pin time to be ``trimesh.interfaces.generic`` (blender / openscad / generic
+    mesh scripts), ``trimesh.exchange.ply`` (fast external PLY reader) and
+    ``trimesh.exchange.binvox`` (the binvox voxeliser).  ``trimesh.<x>.
+    subprocess.run([...])`` would be a direct in-process escape gadget, so we
+    overwrite EVERY ``subprocess`` global across the whole ``trimesh`` package
+    (not just one submodule) with a denier.  PLA-1091: the ``os`` global is
+    scrubbed with the same predicate — on EVERY trimesh submodule that holds a
+    real ``os`` (e.g. ``trimesh.interfaces.*`` plus ``trimesh.exchange.binvox``
+    / ``trimesh.exchange.ply``), not just ``interfaces.*`` — so a captured
+    ``trimesh.exchange.binvox.os.system(...)`` gadget cannot be reached.
+    manifold3d — the exact boolean engine trimesh auto-selects — is fully
+    in-process and needs none of them.
+
+    Defence-in-depth note: even an un-scrubbed shell-out would still hit the
+    kernel seccomp filter on ``execve``/``clone`` (SIGSYS); this scrub is the
+    friendly in-process layer that matches the worker's existing
+    layer-responsibility split.  PLA-1091 closes the trimesh-side real-``os``
+    gadgets; a captured real-``os`` reference inside a *cadquery* submodule
+    namespace remains reachable — the same pre-existing class the kernel layer
+    backstops — and is called out in the PLA-1089 threat model.
+
+    Best-effort: if the mesh stack is not installed, mesh tooling is simply
+    unavailable; the worker still serves non-mesh scripts.  We never fail the
+    whole worker on a missing optional dependency.
+    """
+    try:
+        import trimesh  # noqa: PLC0415, F401
+        import manifold3d  # noqa: PLC0415, F401
+    except Exception:  # noqa: BLE001
+        return  # mesh tooling unavailable on this host; non-fatal.
+
+    for mod_name in list(sys.modules):
+        if mod_name != "trimesh" and not mod_name.startswith("trimesh."):
+            continue
+        mod = sys.modules.get(mod_name)
+        if mod is None:
+            continue
+        # Scrub the subprocess shell-out gadget on EVERY trimesh submodule.
+        cur = getattr(mod, "subprocess", None)
+        if isinstance(cur, ModuleType) and getattr(cur, "__name__", "") == "subprocess":
+            try:
+                mod.subprocess = _BLOCKED_SHELLOUT  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001
+                pass
+        # PLA-1091: mirror the `subprocess` predicate for `os`. Several trimesh
+        # shell-out readers capture a real `os` reference at import time —
+        # `trimesh.interfaces.*` (tempfile plumbing for the blender/openscad
+        # scripts) AND `trimesh.exchange.binvox` / `trimesh.exchange.ply` (the
+        # external binvox/PLY readers), reachable as e.g.
+        # `trimesh.exchange.binvox.os.system(...)`. The manifold engine is fully
+        # in-process and needs none of them, so scrub `os` on ANY trimesh
+        # submodule that holds a real `os`, not just `interfaces.*`. Submodules
+        # that bound no real `os` are skipped by the predicate.
+        cur_os = getattr(mod, "os", None)
+        if isinstance(cur_os, ModuleType) and getattr(cur_os, "__name__", "") == "os":
+            try:
+                mod.os = _BLOCKED_SHELLOUT  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def _install_network_block() -> None:
     """
     Replace all blocked modules in sys.modules with stubs.
@@ -673,6 +778,13 @@ def _run_script(script: str, fmt: str, workdir: str) -> dict:
                 + traceback.format_exc()
             ),
         }
+
+    # PLA-1089 Ask 2: pre-import the mesh-boolean stack (trimesh + manifold3d)
+    # under the real import system and scrub trimesh's shell-out gadgets. MUST
+    # run AFTER CadQuery init (numpy is shared) and BEFORE _harden / lockdown so
+    # trimesh's transitive subprocess/threading imports resolve normally and the
+    # cached module is what a user-script `import trimesh` resolves to.
+    _preimport_mesh_libs()
 
     # PLA-75 R2: harden ctypes (pop sys.modules + extend meta-path block).
     # MUST run AFTER CadQuery is imported (so cq's bindings are resolved) and

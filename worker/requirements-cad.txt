@@ -18,6 +18,19 @@
 cadquery==2.7.0
 cadquery-ocp==7.8.1.1.post1
 #
+# Mesh-boolean tooling (PLA-1089 Ask 2). OCC BRepOffsetAPI_MakeOffsetShape is
+# unusable on faceted (scan-derived) solids, so faceted repair/offset/boolean
+# is done on the mesh with trimesh (watertight repair + orientation) backed by
+# manifold3d (exact in-process boolean engine — NO subprocess shell-out, unlike
+# trimesh's blender/openscad interfaces). Both import + run a boolean subtract
+# clean under the live bwrap+seccomp filter (verified PLA-1089). Their only
+# declared runtime dep is numpy (already pinned at 2.4.4), so `--no-deps`
+# install needs no additional transitive pins. trimesh is pre-imported and its
+# `interfaces` shell-out globals are scrubbed in cad_worker.py before lockdown
+# (see _preimport_mesh_libs) so a user script cannot reach `subprocess`/`os`.
+trimesh==4.12.2
+manifold3d==3.5.1
+#
 # Transitive dependencies (exact pins from pip freeze):
 casadi==3.7.2
 ezdxf==1.4.3

@@ -61,15 +61,80 @@ const HAS_BWRAP = bwrapAvailable();
 /** Iterations per spec §6.2. */
 const N = 200;
 
-/** Vitest per-test ceiling; N=200 × ~1 s/run + headroom. */
-const SUITE_TIMEOUT_MS = 10 * 60_000;
+/**
+ * Vitest per-test ceiling. The interleaved gate (PLA-1097) runs BOTH the
+ * dev_direct baseline and the bwrap+seccomp samples in one test (≈2× the
+ * single-mode work), so the ceiling is generous.
+ */
+const SUITE_TIMEOUT_MS = 20 * 60_000;
 
-/** Cold-start adder p95 / p99 ceilings (ms). */
-const P95_ADDER_CEILING_MS = 100;
+/**
+ * Cold-start adder p95 / p99 ceilings (ms).
+ *
+ * PLA-1109: the p95 adder = bwrap.p95 − dev_direct.p95, both co-measured
+ * interleaved (PLA-1097) through the same invokeWorker path, so it is a
+ * difference-of-percentiles statistic with a high cross-run noise floor on
+ * GH-hosted runners. Across normal runs on both base and PR branches the
+ * genuine p95 adder lands ~70–108 ms (max observed 108.2 ms), i.e. it brushes
+ * and at times exceeds the original 100 ms §6.2 spec ceiling — a base run
+ * passed by only ~18 ms and a PR confirmation run measured 108.2 ms, both of
+ * which would flake red on their own. The 100 ms value is therefore too tight
+ * for this runner class. Recalibrated to (max observed)×1.25 → 140 ms (CTO
+ * decision formula, PLA-1109): ~29 % headroom over the worst observed for
+ * deterministic-green while still failing on any regression that adds >~32 ms
+ * to the p95 cold-start adder. p99 (200 ms) is untouched.
+ */
+const P95_ADDER_CEILING_MS = 140;
 const P99_ADDER_CEILING_MS = 200;
 
-/** Steady-state median band vs baseline (±5 %). */
+/**
+ * Lower-edge sanity floor only (±5 %): a bwrap median measured as >5 % FASTER
+ * than the dev_direct baseline signals a broken measurement, not a real win.
+ */
 const STEADY_BAND = 0.05;
+
+/**
+ * Steady-state median cold-start adder ceiling (ms) vs the dev_direct baseline.
+ * PLA-1109: §6.3 originally gated the median as a ±5 % ratio band, but the
+ * baseline and bwrap medians are each dominated by the ~2.1 s CadQuery import,
+ * which cancels in the per-percentile diff — so a ±5 % band (~±106 ms on a
+ * ~2.1 s base) measures the import, not the sandbox, and is structurally
+ * TIGHTER than the §6.2 p95 adder ceiling (100 ms) yet evaluated on a noisier
+ * median. We gate the median as an absolute-ms adder instead, the SAME model
+ * as the p95/p99 adders. The genuine fixed-cost bwrap+seccomp p50 overhead is
+ * ~134 ms; 165 ms gives ~31 ms / ~23 % headroom for deterministic-green while
+ * still failing on any regression that adds >31 ms to the median cold-start.
+ */
+const P50_ADDER_CEILING_MS = 165;
+
+/**
+ * §6.3 worst-observed cold-start adder ceiling (ms).
+ *
+ * PLA-1109: the original §6.3 grace check gated `bwrap.max − dev_direct.p50`
+ * — a bwrap *max* minus a baseline *median*. On GH-hosted runners one slow
+ * CadQuery-import iteration (the ~2.1 s import varies run-to-run) is charged
+ * entirely to "bwrap overhead", so the statistic is a high-variance max-of-N
+ * contaminated by import noise: it red ~1-in-6 normal runs (412.5 ms vs a
+ * ~155–279 ms norm) and cannot be deterministically green. This is the same
+ * median-vs-noise contamination PLA-1097/e763fed removed from the p50 path.
+ *
+ * We instead gate the *interleaved per-iteration* worst adder
+ * `max(bwrap_i − dev_i)` over the PLA-1097 paired samples: each bwrap sample
+ * is differenced against the dev_direct sample measured immediately after it,
+ * so import variance shared by the adjacent pair cancels and the statistic
+ * reflects true fixed-cost sandbox overhead. A genuine fixed-cost regression
+ * shifts every paired diff, so the gate stays sensitive. Value = (max
+ * worst-per-iter adder observed across the characterization runs) × 1.5,
+ * rounded up to the nearest 25, sanity-clamped ≤ 400 (CTO decision, PLA-1109).
+ *
+ * Characterized over 6 normal CI runs (3 base + 3 PR#22): worst-per-iter
+ * adders 134.4–267.9 ms (max 267.9). 267.9 × 1.5 = 401.85 → round-up-25 = 425
+ * → clamp ≤ 400 ⇒ 400, i.e. ~1.49× headroom over the worst observed. The
+ * tighter p95/p99/p50 adder ceilings (140/200/165 ms) gate the same paired
+ * data and provide the primary regression sensitivity; this is the §6.3 grace
+ * backstop.
+ */
+const WORST_ITER_ADDER_CEILING_MS = 400;
 
 /**
  * Hard absolute ceiling used when no baseline file is present. Derived from
@@ -177,6 +242,18 @@ async function loadBaseline(): Promise<BaselineFile | null> {
 
 const CAPTURE_BASELINE = process.env.CAD_WORKER_PERF_BASELINE === "1";
 
+/**
+ * PLA-1097: when set, the bwrap gate captures the dev_direct baseline in the
+ * SAME process, interleaved sample-for-sample with the bwrap samples, instead
+ * of reading a baseline file written by a separate (minutes-earlier) CI step.
+ * On a shared GH runner the median wandered ±2-3% between two separate steps,
+ * so the ±5% p50 ratio gate flaked even when the absolute p95/p99 adders were
+ * within ceilings. Interleaving makes runner CPU drift hit both modes equally
+ * so it cancels in the per-percentile diff. CI sets this; local runs may use
+ * the baseline-file path instead.
+ */
+const INTERLEAVE = process.env.CAD_WORKER_PERF_INTERLEAVE === "1";
+
 describe.skipIf(!CAPTURE_BASELINE)("PLA-114 §6.2 — dev_direct baseline capture", () => {
   it(`captures N=${N} dev_direct samples → ${BASELINE_PATH}`, async () => {
     const decision = selectSpawnMode();
@@ -222,30 +299,71 @@ describe.skipIf(!HAS_BWRAP || CAPTURE_BASELINE)(
 
     it(
       `N=${N} cold-start: p95 adder ≤ ${P95_ADDER_CEILING_MS} ms, p99 ≤ ${P99_ADDER_CEILING_MS} ms; ` +
-        `steady-state p50 within ±${STEADY_BAND * 100}% of baseline`,
+        `steady-state p50 adder ≤ ${P50_ADDER_CEILING_MS} ms vs baseline; ` +
+        `worst-per-iter adder ≤ ${WORST_ITER_ADDER_CEILING_MS} ms`,
       async () => {
+        // PLA-1097: build a dev_direct decision in THIS process so the
+        // baseline can be measured interleaved with the bwrap samples (see
+        // INTERLEAVE doc). selectSpawnMode is pure over its env arg, so this
+        // does not disturb the bwrap DECISION resolved in beforeAll.
+        const devDecision = INTERLEAVE
+          ? selectSpawnMode({
+              ...process.env,
+              CAD_WORKER_UNSAFE_DEV: "1",
+              NODE_ENV: "development",
+            })
+          : null;
+        if (devDecision) expect(devDecision.mode).toBe("dev_direct");
+
         // Warm cache so the very first measured run is not unfairly penalized
         // for fs cache + libseccomp blob load + python import warm-up. Spec
         // talks about cold-start *steady-state* — i.e. cold from the worker
-        // pool's POV (no reuse), but the host caches are populated.
-        for (let i = 0; i < 3; i++) await timeOnce(DECISION);
+        // pool's POV (no reuse), but the host caches are populated. Warm both
+        // modes when interleaving.
+        for (let i = 0; i < 3; i++) {
+          await timeOnce(DECISION);
+          if (devDecision) await timeOnce(devDecision);
+        }
 
         const samples: number[] = [];
-        for (let i = 0; i < N; i++) samples.push(await timeOnce(DECISION));
+        const devSamples: number[] = [];
+        for (let i = 0; i < N; i++) {
+          samples.push(await timeOnce(DECISION));
+          if (devDecision) devSamples.push(await timeOnce(devDecision));
+        }
         const bw = summarize(samples);
 
         // eslint-disable-next-line no-console
         console.log(`[perf] bwrap+seccomp: ${JSON.stringify(bw)}`);
 
-        const baseline = await loadBaseline();
+        // Prefer the drift-free interleaved baseline; fall back to a
+        // previously-captured baseline file, then to the absolute ceiling.
+        let baseline: BaselineFile | null = null;
+        if (devDecision) {
+          const dv = summarize(devSamples);
+          // eslint-disable-next-line no-console
+          console.log(`[perf] dev_direct (interleaved): ${JSON.stringify(dv)}`);
+          baseline = {
+            mode: "dev_direct",
+            n: dv.n,
+            p50: dv.p50,
+            p95: dv.p95,
+            p99: dv.p99,
+            capturedAt: new Date().toISOString(),
+          };
+        } else {
+          baseline = await loadBaseline();
+        }
+
         if (baseline) {
+          const adderP50 = bw.p50 - baseline.p50;
           const adderP95 = bw.p95 - baseline.p95;
           const adderP99 = bw.p99 - baseline.p99;
           const medianRatio = bw.p50 / baseline.p50;
           // eslint-disable-next-line no-console
           console.log(
-            `[perf] adder p95=${adderP95.toFixed(1)}ms p99=${adderP99.toFixed(1)}ms ` +
-              `p50_ratio=${medianRatio.toFixed(3)} (baseline n=${baseline.n})`,
+            `[perf] adder p50=${adderP50.toFixed(1)}ms p95=${adderP95.toFixed(1)}ms ` +
+              `p99=${adderP99.toFixed(1)}ms p50_ratio=${medianRatio.toFixed(3)} (baseline n=${baseline.n})`,
           );
 
           expect(
@@ -258,11 +376,24 @@ describe.skipIf(!HAS_BWRAP || CAPTURE_BASELINE)(
             `p99 cold-start adder ${adderP99.toFixed(1)}ms exceeds ${P99_ADDER_CEILING_MS}ms ceiling (§6.2)`,
           ).toBeLessThanOrEqual(P99_ADDER_CEILING_MS);
 
+          // Lower edge stays a hard ratio floor: a sandbox measured as >5%
+          // FASTER than direct spawn signals a broken measurement, not a win.
           expect(
             medianRatio,
-            `steady-state p50 ratio ${medianRatio.toFixed(3)} outside ±${STEADY_BAND * 100}% band (§6.2)`,
+            `steady-state p50 ratio ${medianRatio.toFixed(3)} below ${(1 - STEADY_BAND).toFixed(2)} — bwrap faster than direct spawn signals a measurement error (§6.2)`,
           ).toBeGreaterThanOrEqual(1 - STEADY_BAND);
-          expect(medianRatio).toBeLessThanOrEqual(1 + STEADY_BAND);
+
+          // Upper edge (§6.3): gate the median as an absolute-ms adder, the
+          // SAME model as the p95/p99 adders above. A ±5% ratio on this
+          // import-dominated ~2.1 s baseline is only ~±106 ms — tighter than
+          // the p95 adder ceiling yet on a noisier statistic — so it measures
+          // the CadQuery import, not the sandbox. The adder isolates the
+          // fixed-cost bwrap+seccomp overhead (~134 ms) and still bites on any
+          // regression that adds >~31 ms to the median cold-start.
+          expect(
+            adderP50,
+            `steady-state p50 adder ${adderP50.toFixed(1)}ms (ratio ${medianRatio.toFixed(3)}) exceeds ${P50_ADDER_CEILING_MS}ms ceiling (§6.3)`,
+          ).toBeLessThanOrEqual(P50_ADDER_CEILING_MS);
         } else {
           // No baseline file — fall back to absolute ceiling so the suite is
           // still useful in isolation. CI captures + diffs back-to-back.
@@ -280,15 +411,31 @@ describe.skipIf(!HAS_BWRAP || CAPTURE_BASELINE)(
         // §6.3 — confirm the BWRAP_OVERHEAD_GRACE_MS budget is sufficient.
         // The grace is added to per-request timeouts; if our worst observed
         // bwrap-only overhead would blow it, the production timeout headroom
-        // is wrong.
-        if (baseline) {
+        // is wrong. We measure the worst *interleaved per-iteration* adder
+        // (see WORST_ITER_ADDER_CEILING_MS) so a single slow CadQuery-import
+        // iteration is not mis-attributed to sandbox overhead.
+        if (devDecision && devSamples.length === samples.length) {
+          let worstIterAdder = -Infinity;
+          for (let i = 0; i < samples.length; i++) {
+            const a = samples[i] - devSamples[i];
+            if (a > worstIterAdder) worstIterAdder = a;
+          }
+          // eslint-disable-next-line no-console
+          console.log(
+            `[perf] worst-per-iter adder max(bwrap_i - dev_i)=${worstIterAdder.toFixed(1)}ms (n=${samples.length})`,
+          );
+          expect(
+            worstIterAdder,
+            `worst-per-iteration adder ${worstIterAdder.toFixed(1)}ms exceeds ${WORST_ITER_ADDER_CEILING_MS}ms ceiling (§6.3)`,
+          ).toBeLessThanOrEqual(WORST_ITER_ADDER_CEILING_MS);
+        } else if (baseline) {
+          // Non-interleaved fallback (no paired dev samples, e.g. baseline
+          // loaded from file): retain the original cross-statistic worst check.
           const worstAdder = bw.max - baseline.p50;
           expect(
             worstAdder,
             `worst-observed adder ${worstAdder.toFixed(1)}ms exceeds BWRAP_OVERHEAD_GRACE_MS=${BWRAP_OVERHEAD_GRACE_MS}ms (§6.3)`,
           ).toBeLessThanOrEqual(BWRAP_OVERHEAD_GRACE_MS * 4);
-          // Note: ×4 = the 5 s SIGKILL grace pad. If this fails the §6.3 grace
-          // is too tight — escalate to spec revision rather than papering over.
         }
       },
       SUITE_TIMEOUT_MS,
