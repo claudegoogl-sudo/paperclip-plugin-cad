@@ -126,6 +126,13 @@ const P50_ADDER_CEILING_MS = 165;
  * shifts every paired diff, so the gate stays sensitive. Value = (max
  * worst-per-iter adder observed across the characterization runs) × 1.5,
  * rounded up to the nearest 25, sanity-clamped ≤ 400 (CTO decision, PLA-1109).
+ *
+ * Characterized over 6 normal CI runs (3 base + 3 PR#22): worst-per-iter
+ * adders 134.4–267.9 ms (max 267.9). 267.9 × 1.5 = 401.85 → round-up-25 = 425
+ * → clamp ≤ 400 ⇒ 400, i.e. ~1.49× headroom over the worst observed. The
+ * tighter p95/p99/p50 adder ceilings (140/200/165 ms) gate the same paired
+ * data and provide the primary regression sensitivity; this is the §6.3 grace
+ * backstop.
  */
 const WORST_ITER_ADDER_CEILING_MS = 400;
 
