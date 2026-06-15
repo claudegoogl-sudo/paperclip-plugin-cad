@@ -4,6 +4,24 @@ Tracker: [PLA-32](/PLA/issues/PLA-32)
 
 ---
 
+## Unreleased
+
+### Added
+
+- **Host-provisioning durability for the mesh deps** ([PLA-1127](/PLA/issues/PLA-1127),
+  follow-up to [PLA-1124](/PLA/issues/PLA-1124)). `worker/requirements-cad.txt`
+  now pins the mesh-boolean tooling (`trimesh==4.12.2`, `manifold3d==3.5.1`),
+  and a committed, idempotent `scripts/provision-cad-host.sh` installs those
+  pins into the **sandbox-visible** system site
+  (`/usr/local/lib/python3.12/dist-packages`) on every host rebuild/redeploy.
+  The CAD `bwrap` sandbox ro-binds `/usr` only, so a `--user`/`~/.local` or
+  `/tmp` install is invisible to the worker — these deps did not survive a host
+  rebuild until now. No plugin version bump: the JS bundle is unchanged
+  (host-provisioning correction only). See the README "Host provisioning"
+  section.
+
+---
+
 ## v0.1.6 — 2026-05-14
 
 ### Fixed
