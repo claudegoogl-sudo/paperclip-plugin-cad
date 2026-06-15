@@ -300,17 +300,21 @@ def _preimport_mesh_libs() -> None:
     ``trimesh.exchange.binvox`` (the binvox voxeliser).  ``trimesh.<x>.
     subprocess.run([...])`` would be a direct in-process escape gadget, so we
     overwrite EVERY ``subprocess`` global across the whole ``trimesh`` package
-    (not just one submodule) with a denier.  The ``os`` global on the shell-out
-    interface modules is scrubbed too.  manifold3d — the exact boolean engine
-    trimesh auto-selects — is fully in-process and needs none of them.
+    (not just one submodule) with a denier.  PLA-1091: the ``os`` global is
+    scrubbed with the same predicate — on EVERY trimesh submodule that holds a
+    real ``os`` (e.g. ``trimesh.interfaces.*`` plus ``trimesh.exchange.binvox``
+    / ``trimesh.exchange.ply``), not just ``interfaces.*`` — so a captured
+    ``trimesh.exchange.binvox.os.system(...)`` gadget cannot be reached.
+    manifold3d — the exact boolean engine trimesh auto-selects — is fully
+    in-process and needs none of them.
 
     Defence-in-depth note: even an un-scrubbed shell-out would still hit the
     kernel seccomp filter on ``execve``/``clone`` (SIGSYS); this scrub is the
     friendly in-process layer that matches the worker's existing
-    layer-responsibility split.  A captured real-``os`` reference inside a
-    trimesh (or cadquery) submodule namespace remains reachable — the same
-    pre-existing class the kernel layer backstops — and is called out in the
-    PLA-1089 threat model for SecurityEngineer review.
+    layer-responsibility split.  PLA-1091 closes the trimesh-side real-``os``
+    gadgets; a captured real-``os`` reference inside a *cadquery* submodule
+    namespace remains reachable — the same pre-existing class the kernel layer
+    backstops — and is called out in the PLA-1089 threat model.
 
     Best-effort: if the mesh stack is not installed, mesh tooling is simply
     unavailable; the worker still serves non-mesh scripts.  We never fail the
@@ -335,15 +339,21 @@ def _preimport_mesh_libs() -> None:
                 mod.subprocess = _BLOCKED_SHELLOUT  # type: ignore[attr-defined]
             except Exception:  # noqa: BLE001
                 pass
-        # The shell-out interface modules also bind `os` for tempfile plumbing;
-        # they never run under the manifold engine, so scrub it there too.
-        if mod_name == "trimesh.interfaces" or mod_name.startswith("trimesh.interfaces."):
-            cur_os = getattr(mod, "os", None)
-            if isinstance(cur_os, ModuleType) and getattr(cur_os, "__name__", "") == "os":
-                try:
-                    mod.os = _BLOCKED_SHELLOUT  # type: ignore[attr-defined]
-                except Exception:  # noqa: BLE001
-                    pass
+        # PLA-1091: mirror the `subprocess` predicate for `os`. Several trimesh
+        # shell-out readers capture a real `os` reference at import time —
+        # `trimesh.interfaces.*` (tempfile plumbing for the blender/openscad
+        # scripts) AND `trimesh.exchange.binvox` / `trimesh.exchange.ply` (the
+        # external binvox/PLY readers), reachable as e.g.
+        # `trimesh.exchange.binvox.os.system(...)`. The manifold engine is fully
+        # in-process and needs none of them, so scrub `os` on ANY trimesh
+        # submodule that holds a real `os`, not just `interfaces.*`. Submodules
+        # that bound no real `os` are skipped by the predicate.
+        cur_os = getattr(mod, "os", None)
+        if isinstance(cur_os, ModuleType) and getattr(cur_os, "__name__", "") == "os":
+            try:
+                mod.os = _BLOCKED_SHELLOUT  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def _install_network_block() -> None:
