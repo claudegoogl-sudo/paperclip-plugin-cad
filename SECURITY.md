@@ -1,6 +1,6 @@
-# Security Model — paperclip-plugin-cad v0.1.2
+# Security Model — paperclip-plugin-cad v0.1.10
 
-Tracker: [PLA-32](/PLA/issues/PLA-32)
+Tracker: [PLA-32](/PLA/issues/PLA-32) · Per-tenant scoping: [PLA-1099](/PLA/issues/PLA-1099)
 
 ---
 
@@ -38,6 +38,65 @@ CadQuery scripts supplied by agents run in a per-request subprocess spawned by t
 
 ---
 
+## Per-tenant artifact scoping ([PLA-1099](/PLA/issues/PLA-1099) SE-1)
+
+The cad-artifacts repo is shared across every company on the host, and its
+contents are tenant-confidential proprietary CAD IP (data classification
+[PLA-1098](/PLA/issues/PLA-1098)). A read or write that crosses a company
+boundary is a confidentiality breach. Both the intake (read) and export
+(write) paths are therefore confined to the caller's own tenant subtree.
+
+### Tenant identity is host-derived, never caller-supplied
+
+`companyId` is read from the `ToolRunContext` (`runCtx.companyId`) that the
+host injects, not from any tool parameter. A `cad.run_script` /
+`cad.export` call with missing or empty tenant context is rejected with a
+structured `validation_error` before any fetch or render (see the F6
+tenant-context gate in `src/worker.ts`). The value is shape-validated with
+`assertSafeCompanyId` (`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`, no leading dot)
+so it cannot itself inject path segments or traversal.
+
+### Export confinement (`cad.export`)
+
+Artifacts are written under `artifacts/<companyId>/<ticket>/<toolCallId>/<file>`.
+The `<companyId>` segment is derived from `runCtx`; the per-call
+`assertSafeRepoPath` re-checks that the normalized path begins with
+`artifacts/<companyId>/` before any GitHub write, so a tenant can only ever
+commit into its own subtree.
+
+### Intake confinement (`cad.run_script` `inputArtifacts`)
+
+`assertSafeIntakePath` (in `src/cad-intake.ts`) runs after the existing
+traversal/allowlist checks. Any `repoPath` normalizing under `artifacts/`
+that is **not** within `artifacts/<companyId>/` is rejected with a structured
+validation error and **no fetch is issued** — cross-tenant reads fail closed.
+
+### Back-compat posture for legacy flat `artifacts/<ticket>/...` permalinks
+
+Artifacts committed before this change live at the flat path
+`artifacts/<ticket>/<call>/<file>` with **no tenant segment**, so they cannot
+be attributed to an owning company. Confidentiality-first, these legacy
+permalinks are **rejected** by intake (they do not match any
+`artifacts/<companyId>/` prefix) rather than left readable across tenants.
+This is a deliberate, documented break: an unattributable artifact path is
+treated as out-of-tenant. Operators needing a legacy artifact must re-stage it
+under the owning tenant's `artifacts/<companyId>/` subtree. New exports already
+write the tenant-scoped layout, so the legacy shape only affects pre-existing
+commits.
+
+### Phase 2 — `user-uploads/` scoping (gated, not yet enforced)
+
+`user-uploads/` is the operator/agent upload surface. Per-tenant enforcement
+for it is implemented but **disabled** behind
+`ENFORCE_USER_UPLOADS_TENANT_SCOPING = false` until the cross-team upload-side
+migration to `user-uploads/<companyId>/` lands ([PLA-1098](/PLA/issues/PLA-1098)).
+Flipping the flag before the upload layout migrates would break legitimate
+intake. Until then `user-uploads/` paths keep the pre-existing allowlist-only
+behavior. Do not enable enforcement without CTO confirmation that the upload
+side has migrated.
+
+---
+
 ## Supported attack model
 
 ### In-scope (plugin defends against)
@@ -48,6 +107,8 @@ CadQuery scripts supplied by agents run in a per-request subprocess spawned by t
 | Agent attempting to extract PAT via tool response | PAT never returned from tool calls |
 | Agent attempting to log PAT | No `ctx.logger` calls include the PAT value |
 | Agent supplying malformed `githubPatSecretId` (string name instead of UUID) | Validated at Paperclip secrets handler; throws `InvalidSecretRefError` |
+| Agent reading another tenant's CAD scan via `inputArtifacts` `repoPath` | Intake confined to `artifacts/<companyId>/`; cross-tenant + unattributable legacy paths rejected, no fetch ([PLA-1099](/PLA/issues/PLA-1099)) |
+| Agent writing into another tenant's subtree via `cad.export` | Export path derives `<companyId>` from `runCtx`; `assertSafeRepoPath` re-checks tenant prefix before push ([PLA-1099](/PLA/issues/PLA-1099)) |
 
 ### Out-of-scope (operator responsibility)
 

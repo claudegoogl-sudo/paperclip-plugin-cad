@@ -164,7 +164,7 @@ describe("cad.export PLA-56 pipeline", () => {
     expect(result.data?.error).toBeUndefined();
     expect(result.data?.commitSha).toBe("commitsha456");
     expect(result.data?.permalink).toContain("commitsha456");
-    expect(result.data?.artifactPath).toBe("artifacts/PLA-56/call-001/artifact.step");
+    expect(result.data?.artifactPath).toBe("artifacts/company-A/PLA-56/call-001/artifact.step");
 
     const putCalls = fetchMock.mock.calls.filter((c) => (c[1] as RequestInit | undefined)?.method === "PUT");
     expect(putCalls).toHaveLength(0);
@@ -186,8 +186,8 @@ describe("cad.export PLA-56 pipeline", () => {
     expect(result.data?.error).toBeUndefined();
     expect(result.data?.commitSha).toBe("deadbeef1234");
     expect(result.data?.permalink).toContain("deadbeef1234");
-    expect(result.data?.permalink).toContain("artifacts/PLA-56/call-001/artifact.step");
-    expect(result.data?.artifactPath).toBe("artifacts/PLA-56/call-001/artifact.step");
+    expect(result.data?.permalink).toContain("artifacts/company-A/PLA-56/call-001/artifact.step");
+    expect(result.data?.artifactPath).toBe("artifacts/company-A/PLA-56/call-001/artifact.step");
   });
 
   it("AC3: PAT not present in returned data", async () => {
@@ -322,7 +322,7 @@ describe("cad.export PLA-56 pipeline", () => {
     vi.resetModules();
   });
 
-  it("deterministic path: artifacts/{ticketId}/{callId}/{filename}", { timeout: 15000 }, async () => {
+  it("deterministic path: artifacts/{companyId}/{ticketId}/{callId}/{filename}", { timeout: 15000 }, async () => {
     const artifactId = await stageArtifact();
     const fetchMock = vi.mocked(globalThis.fetch);
     fetchMock.mockReset();
@@ -335,10 +335,10 @@ describe("cad.export PLA-56 pipeline", () => {
       artifactId, format: "stl" as const,
       paperclipTicketId: "PLA-42", toolCallId: "tc-xyz", filename: "part.stl",
     })) as { data?: { artifactPath?: string } };
-    expect(result.data?.artifactPath).toBe("artifacts/PLA-42/tc-xyz/part.stl");
+    expect(result.data?.artifactPath).toBe("artifacts/company-A/PLA-42/tc-xyz/part.stl");
 
     const putCall = fetchMock.mock.calls.find((c) => (c[1] as RequestInit | undefined)?.method === "PUT");
-    expect(typeof putCall![0] === "string" ? putCall![0] : "").toContain("artifacts/PLA-42/tc-xyz/part.stl");
+    expect(typeof putCall![0] === "string" ? putCall![0] : "").toContain("artifacts/company-A/PLA-42/tc-xyz/part.stl");
   });
 
   // -------------------------------------------------------------------------
@@ -546,7 +546,7 @@ describe("cad.export PLA-74 F1/F2 — input allowlist (path-traversal + commit-i
       paperclipTicketId: "PLA-56", toolCallId: "call_x-1",
       filename: "model.stl",
     })) as { data?: { artifactPath?: string } };
-    expect(result.data?.artifactPath).toBe("artifacts/PLA-56/call_x-1/model.stl");
+    expect(result.data?.artifactPath).toBe("artifacts/company-A/PLA-56/call_x-1/model.stl");
     expect(result.data?.artifactPath?.startsWith("artifacts/")).toBe(true);
   });
 
@@ -577,7 +577,7 @@ describe("cad.export PLA-74 F1/F2 — input allowlist (path-traversal + commit-i
     const putCall = fetchMock.mock.calls.find((c) => (c[1] as RequestInit | undefined)?.method === "PUT");
     expect(putCall).toBeDefined();
     const putUrl = typeof putCall![0] === "string" ? putCall![0] : (putCall![0] as Request).url;
-    expect(putUrl).toContain("/contents/artifacts/PLA-56/abc/part.step");
+    expect(putUrl).toContain("/contents/artifacts/company-A/PLA-56/abc/part.step");
   });
 });
 
@@ -608,11 +608,11 @@ describe("cad.export PLA-443 — dxf / svg 2D vector formats", () => {
     })) as { data?: { artifactPath?: string; commitSha?: string; error?: string } };
     expect(result.data?.error).toBeUndefined();
     expect(result.data?.commitSha).toBe("dxfsha");
-    expect(result.data?.artifactPath).toBe("artifacts/PLA-56/call-001/artifact.dxf");
+    expect(result.data?.artifactPath).toBe("artifacts/company-A/PLA-56/call-001/artifact.dxf");
 
     const putCall = fetchMock.mock.calls.find((c) => (c[1] as RequestInit | undefined)?.method === "PUT");
     const putUrl = typeof putCall![0] === "string" ? putCall![0] : (putCall![0] as Request).url;
-    expect(putUrl).toContain("/contents/artifacts/PLA-56/call-001/artifact.dxf");
+    expect(putUrl).toContain("/contents/artifacts/company-A/PLA-56/call-001/artifact.dxf");
   });
 
   it("accepts format='svg' and commits artifact.svg via the same pipeline", async () => {
@@ -631,7 +631,7 @@ describe("cad.export PLA-443 — dxf / svg 2D vector formats", () => {
     })) as { data?: { artifactPath?: string; commitSha?: string; error?: string } };
     expect(result.data?.error).toBeUndefined();
     expect(result.data?.commitSha).toBe("svgsha");
-    expect(result.data?.artifactPath).toBe("artifacts/PLA-56/call-001/artifact.svg");
+    expect(result.data?.artifactPath).toBe("artifacts/company-A/PLA-56/call-001/artifact.svg");
   });
 
   it("rejects an unknown 2D-ish format ('eps') with validation_error", async () => {

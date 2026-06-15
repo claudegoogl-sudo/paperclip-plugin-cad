@@ -4,6 +4,40 @@ Tracker: [PLA-32](/PLA/issues/PLA-32)
 
 ---
 
+## v0.1.12 — 2026-06-15
+
+### Security
+
+- **Per-tenant scoping of artifact intake + export — forward-rebase of SE-1
+  onto the 0.1.11 base ([PLA-1099](/PLA/issues/PLA-1099) SE-1, rebase
+  [PLA-1130](/PLA/issues/PLA-1130)).** SE-1 was originally cut as a 0.1.10 on
+  the 0.1.9 base; the mainline independently shipped a different 0.1.10
+  ([PLA-1101](/PLA/issues/PLA-1101) staging-cap) → 0.1.11
+  ([PLA-1094](/PLA/issues/PLA-1094) read-only intake PAT). This release rebases
+  the SE-1 scoping forward so both survive: intake reads via the dedicated
+  read-only `intakePatSecretId` **and** are confined to `artifacts/<companyId>/`.
+  The cad-artifacts repo is shared across all companies on a host and its
+  contents are tenant-confidential CAD IP
+  ([PLA-1098](/PLA/issues/PLA-1098)). Both paths are now confined to the
+  caller's own tenant subtree, with `companyId` derived from `runCtx` (never
+  caller-supplied) and shape-validated by `assertSafeCompanyId`:
+  - `cad.export` writes under `artifacts/<companyId>/<ticket>/<call>/<file>`;
+    `assertSafeRepoPath` re-checks the tenant prefix before any GitHub write.
+  - `cad.run_script` intake (`assertSafeIntakePath`) rejects any `artifacts/`
+    `repoPath` not within `artifacts/<companyId>/` with a structured
+    validation error and **no fetch** — cross-tenant reads fail closed. The
+    tenant check runs in `parseInputArtifacts` **before** the PAT is resolved,
+    so the dedicated read-only intake PAT cannot widen the read surface past
+    the caller's own subtree.
+  - **Back-compat:** legacy flat `artifacts/<ticket>/...` permalinks (no tenant
+    segment, unattributable) are **rejected** by intake — confidentiality-first,
+    documented in `SECURITY.md`.
+  - **Phase 2 (gated):** `user-uploads/<companyId>/` enforcement is implemented
+    but disabled behind `ENFORCE_USER_UPLOADS_TENANT_SCOPING = false` until the
+    upload-side migration lands ([PLA-1098](/PLA/issues/PLA-1098)).
+
+---
+
 ## v0.1.11 — 2026-06-15
 
 ### Added

@@ -68,6 +68,51 @@ export const DEFAULT_INTAKE_CAPS: IntakeCaps = {
  */
 export const INTAKE_ALLOWED_PREFIXES = ["user-uploads/", "artifacts/"] as const;
 
+// ---------------------------------------------------------------------------
+// PLA-1099 SE-1 — per-tenant scoping
+//
+// `cad-artifacts` content is tenant-confidential proprietary CAD IP (CTO
+// data-classification call, PLA-1098), NOT shared staging. A caller in company X
+// must never read company Y's scan, and export permalinks must not be a
+// cross-tenant discovery surface. The caller's tenant (`companyId`) is already
+// required at the fetch site (`worker.ts`), so we thread it through and confine
+// every intake/export to the caller's own `<companyId>/` subtree.
+// ---------------------------------------------------------------------------
+
+/**
+ * Phase 2 flag (PLA-1099). When `true`, `user-uploads/` reads are confined to
+ * `user-uploads/<companyId>/`. GATED OFF until the upload-side (3d-printing /
+ * DPR) migration writes per-company first — flipping early would 404 every
+ * current flat `user-uploads/<file>` upload. Do NOT flip until CTO confirms the
+ * upload-side migration has landed (PLA-1098). Phase 1 (`artifacts/`) scoping is
+ * always on and independent of this flag.
+ */
+export const ENFORCE_USER_UPLOADS_TENANT_SCOPING = false;
+
+/** Companies are referenced as a single path segment; mirror the basename class. */
+const COMPANY_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/**
+ * Validate the caller's `companyId` before it is interpolated into a repo-path
+ * prefix. Fail-closed: a malformed companyId means we cannot safely scope, so the
+ * caller turns this into a rejection rather than reading an unscoped path.
+ */
+export function assertSafeCompanyId(companyId: unknown): string | null {
+  if (typeof companyId !== "string" || companyId.length === 0) {
+    return "callerCompanyId must be a non-empty string";
+  }
+  if (!COMPANY_ID_RE.test(companyId)) {
+    return "callerCompanyId has disallowed characters (allowed: A-Za-z0-9._-, no leading dot)";
+  }
+  return null;
+}
+
+/** Options for the per-tenant scoping checks. */
+export interface IntakeScopeOptions {
+  /** Override the Phase-2 `user-uploads/` enforcement flag (tests). */
+  enforceUserUploadsScoping?: boolean;
+}
+
 /** A fetched, validated input file ready to stage into a sandbox workdir. */
 export interface InputFile {
   /** Basename only — never a path with directory components. */
@@ -105,11 +150,26 @@ export class IntakeError extends Error {
 const BASENAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 /**
- * Validate an intake `repoPath`. Returns an error string (caller turns it into a
- * structured tool error) or `null` if safe. Mirrors the export allowlist's
- * normalize-equality check but uses the intake prefix set.
+ * Validate an intake `repoPath` for a caller in `callerCompanyId`. Returns an
+ * error string (caller turns it into a structured tool error) or `null` if safe.
+ * Mirrors the export allowlist's normalize-equality check, then applies SE-1
+ * per-tenant scoping:
+ *
+ *   - `artifacts/...` (Phase 1, always on): must be under
+ *     `artifacts/<callerCompanyId>/`. Legacy flat `artifacts/<ticket>/...`
+ *     permalinks (pre-0.1.9 exports) are REJECTED — they cannot be attributed to
+ *     a tenant, so we cannot prove the caller could have written them. (Chosen
+ *     back-compat posture; see `SECURITY.md`, SE sign-off on PLA-1099.)
+ *   - `user-uploads/...` (Phase 2, gated by `ENFORCE_USER_UPLOADS_TENANT_SCOPING`):
+ *     when enabled, must be under `user-uploads/<callerCompanyId>/`; otherwise
+ *     the existing flat behavior is preserved until the upload-side migration
+ *     lands (PLA-1098).
  */
-export function assertSafeIntakePath(repoPath: unknown): string | null {
+export function assertSafeIntakePath(
+  repoPath: unknown,
+  callerCompanyId: string,
+  opts: IntakeScopeOptions = {},
+): string | null {
   if (typeof repoPath !== "string" || repoPath.length === 0) {
     return "repoPath must be a non-empty string";
   }
@@ -141,6 +201,24 @@ export function assertSafeIntakePath(repoPath: unknown): string | null {
   if (!BASENAME_RE.test(base)) {
     return "repoPath basename has disallowed characters (allowed: A-Za-z0-9._-, no leading dot)";
   }
+  // PLA-1099 SE-1: per-tenant scoping. Fail-closed if the caller's tenant is
+  // missing/malformed — without a safe companyId we cannot prove ownership.
+  const cidErr = assertSafeCompanyId(callerCompanyId);
+  if (cidErr) return `internal: ${cidErr}`;
+  if (normalized.startsWith("artifacts/")) {
+    const tenantPrefix = `artifacts/${callerCompanyId}/`;
+    if (!normalized.startsWith(tenantPrefix)) {
+      return `repoPath under 'artifacts/' must be within your tenant subtree '${tenantPrefix}' (cross-tenant read blocked)`;
+    }
+  } else if (normalized.startsWith("user-uploads/")) {
+    const enforce = opts.enforceUserUploadsScoping ?? ENFORCE_USER_UPLOADS_TENANT_SCOPING;
+    if (enforce) {
+      const tenantPrefix = `user-uploads/${callerCompanyId}/`;
+      if (!normalized.startsWith(tenantPrefix)) {
+        return `repoPath under 'user-uploads/' must be within your tenant subtree '${tenantPrefix}' (cross-tenant read blocked)`;
+      }
+    }
+  }
   return null;
 }
 
@@ -150,7 +228,11 @@ export function assertSafeIntakePath(repoPath: unknown): string | null {
  * Rejects duplicate basenames (two distinct repoPaths that would stage to the
  * same `inputs/<basename>`), which would otherwise silently clobber.
  */
-export function parseInputArtifacts(raw: unknown): { repoPaths: string[] } | { error: string } {
+export function parseInputArtifacts(
+  raw: unknown,
+  callerCompanyId: string,
+  opts: IntakeScopeOptions = {},
+): { repoPaths: string[] } | { error: string } {
   if (raw === undefined || raw === null) return { repoPaths: [] };
   if (!Array.isArray(raw)) return { error: "inputArtifacts must be an array" };
   if (raw.length === 0) return { repoPaths: [] };
@@ -169,7 +251,7 @@ export function parseInputArtifacts(raw: unknown): { repoPaths: string[] } | { e
       return { error: `inputArtifacts[${i}] has unexpected keys (only 'repoPath' allowed)` };
     }
     const repoPath = (item as { repoPath?: unknown }).repoPath;
-    const err = assertSafeIntakePath(repoPath);
+    const err = assertSafeIntakePath(repoPath, callerCompanyId, opts);
     if (err) return { error: `inputArtifacts[${i}].${err}` };
     const base = path.posix.basename(repoPath as string);
     if (seenBasenames.has(base)) {

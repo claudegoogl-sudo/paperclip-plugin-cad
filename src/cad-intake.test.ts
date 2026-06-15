@@ -17,6 +17,7 @@ import { join } from "node:path";
 
 import {
   assertSafeIntakePath,
+  assertSafeCompanyId,
   parseInputArtifacts,
   fetchInputArtifact,
   fetchInputArtifacts,
@@ -28,6 +29,10 @@ import {
 } from "./cad-intake.js";
 
 const REPO = "https://github.com/claudegoogl-sudo/cad-artifacts.git";
+
+// PLA-1099 SE-1: the caller's tenant. artifacts/ paths must live under
+// artifacts/<CO>/; cross-tenant reads are rejected.
+const CO = "company-A";
 
 // Minimal Response-like stub for the injected fetch.
 function fakeResponse(opts: {
@@ -53,10 +58,10 @@ function fakeResponse(opts: {
 }
 
 describe("assertSafeIntakePath", () => {
-  it("accepts allowlisted file paths", () => {
-    expect(assertSafeIntakePath("user-uploads/scan.stl")).toBeNull();
-    expect(assertSafeIntakePath("artifacts/PLA-1/call-1/out.3mf")).toBeNull();
-    expect(assertSafeIntakePath("user-uploads/sub/dir/mesh.ply")).toBeNull();
+  it("accepts allowlisted file paths within the caller's tenant", () => {
+    expect(assertSafeIntakePath("user-uploads/scan.stl", CO)).toBeNull();
+    expect(assertSafeIntakePath(`artifacts/${CO}/call-1/out.3mf`, CO)).toBeNull();
+    expect(assertSafeIntakePath("user-uploads/sub/dir/mesh.ply", CO)).toBeNull();
   });
 
   it("rejects traversal, absolute, and out-of-allowlist paths", () => {
@@ -72,52 +77,125 @@ describe("assertSafeIntakePath", () => {
       "user-uploads/", // directory, no basename
       "", // empty
     ]) {
-      expect(assertSafeIntakePath(bad), `expected reject: ${JSON.stringify(bad)}`).not.toBeNull();
+      expect(assertSafeIntakePath(bad, CO), `expected reject: ${JSON.stringify(bad)}`).not.toBeNull();
     }
   });
 
   it("rejects NUL and non-string", () => {
-    expect(assertSafeIntakePath("user-uploads/a\x00b.stl")).not.toBeNull();
-    expect(assertSafeIntakePath(42 as unknown)).not.toBeNull();
-    expect(assertSafeIntakePath(undefined as unknown)).not.toBeNull();
+    expect(assertSafeIntakePath("user-uploads/a\x00b.stl", CO)).not.toBeNull();
+    expect(assertSafeIntakePath(42 as unknown, CO)).not.toBeNull();
+    expect(assertSafeIntakePath(undefined as unknown, CO)).not.toBeNull();
   });
 
   it("rejects a basename with disallowed characters", () => {
-    expect(assertSafeIntakePath("user-uploads/.hidden")).not.toBeNull();
-    expect(assertSafeIntakePath("user-uploads/a b.stl")).not.toBeNull();
+    expect(assertSafeIntakePath("user-uploads/.hidden", CO)).not.toBeNull();
+    expect(assertSafeIntakePath("user-uploads/a b.stl", CO)).not.toBeNull();
+  });
+});
+
+describe("assertSafeIntakePath — PLA-1099 SE-1 per-tenant scoping", () => {
+  it("accepts an artifacts/ path within the caller's own tenant subtree", () => {
+    expect(assertSafeIntakePath(`artifacts/${CO}/PLA-1/call-1/out.stl`, CO)).toBeNull();
+    expect(assertSafeIntakePath(`artifacts/${CO}/PLA-99/tc-1/artifact.step`, CO)).toBeNull();
+  });
+
+  it("rejects an artifacts/ path under ANOTHER tenant's subtree (cross-tenant read)", () => {
+    const err = assertSafeIntakePath("artifacts/company-B/PLA-1/call-1/out.stl", CO);
+    expect(err).not.toBeNull();
+    expect(err).toMatch(/tenant subtree/);
+  });
+
+  it("rejects a legacy flat artifacts/ permalink (pre-0.1.9, unattributable)", () => {
+    // artifacts/<ticket>/... with no companyId segment — cannot prove the caller
+    // wrote it, so the chosen back-compat posture is reject (see SECURITY.md).
+    const err = assertSafeIntakePath("artifacts/PLA-56/call-001/artifact.step", CO);
+    expect(err).not.toBeNull();
+    expect(err).toMatch(/tenant subtree/);
+  });
+
+  it("rejects a sibling-prefix tenant name (no 'company-A' ⊂ 'company-AA' escape)", () => {
+    expect(assertSafeIntakePath("artifacts/company-AA/x.stl", CO)).not.toBeNull();
+  });
+
+  it("fails closed when the caller's companyId is missing or malformed", () => {
+    expect(assertSafeIntakePath(`artifacts/${CO}/x.stl`, "" as unknown as string)).not.toBeNull();
+    expect(assertSafeIntakePath(`artifacts/${CO}/x.stl`, "bad/slash")).not.toBeNull();
+  });
+
+  it("leaves user-uploads/ unscoped by default (Phase 2 gated off)", () => {
+    expect(assertSafeIntakePath("user-uploads/scan.stl", CO)).toBeNull();
+    expect(assertSafeIntakePath("user-uploads/anyones/scan.stl", CO)).toBeNull();
+  });
+
+  it("when Phase 2 enforcement is enabled, scopes user-uploads/ to the tenant too", () => {
+    const opts = { enforceUserUploadsScoping: true };
+    expect(assertSafeIntakePath(`user-uploads/${CO}/scan.stl`, CO, opts)).toBeNull();
+    const err = assertSafeIntakePath("user-uploads/company-B/scan.stl", CO, opts);
+    expect(err).not.toBeNull();
+    expect(err).toMatch(/tenant subtree/);
+    expect(assertSafeIntakePath("user-uploads/scan.stl", CO, opts)).not.toBeNull();
+  });
+});
+
+describe("assertSafeCompanyId", () => {
+  it("accepts well-formed ids (uuid-shaped, alnum, hyphen)", () => {
+    expect(assertSafeCompanyId("company-A")).toBeNull();
+    expect(assertSafeCompanyId("d49b266c-50dc-42c5-b45e-308c7f3ffc1f")).toBeNull();
+  });
+
+  it("rejects empty, non-string, and path-unsafe ids", () => {
+    expect(assertSafeCompanyId("")).not.toBeNull();
+    expect(assertSafeCompanyId(undefined)).not.toBeNull();
+    expect(assertSafeCompanyId("a/b")).not.toBeNull();
+    expect(assertSafeCompanyId("..")).not.toBeNull();
+    expect(assertSafeCompanyId(".hidden")).not.toBeNull();
   });
 });
 
 describe("parseInputArtifacts", () => {
   it("treats undefined/null/empty as no inputs", () => {
-    expect(parseInputArtifacts(undefined)).toEqual({ repoPaths: [] });
-    expect(parseInputArtifacts(null)).toEqual({ repoPaths: [] });
-    expect(parseInputArtifacts([])).toEqual({ repoPaths: [] });
+    expect(parseInputArtifacts(undefined, CO)).toEqual({ repoPaths: [] });
+    expect(parseInputArtifacts(null, CO)).toEqual({ repoPaths: [] });
+    expect(parseInputArtifacts([], CO)).toEqual({ repoPaths: [] });
   });
 
-  it("accepts a valid list", () => {
-    const r = parseInputArtifacts([{ repoPath: "user-uploads/a.stl" }, { repoPath: "artifacts/x/b.stl" }]);
-    expect(r).toEqual({ repoPaths: ["user-uploads/a.stl", "artifacts/x/b.stl"] });
+  it("accepts a valid list within the caller's tenant", () => {
+    const r = parseInputArtifacts(
+      [{ repoPath: "user-uploads/a.stl" }, { repoPath: `artifacts/${CO}/b.stl` }],
+      CO,
+    );
+    expect(r).toEqual({ repoPaths: ["user-uploads/a.stl", `artifacts/${CO}/b.stl`] });
+  });
+
+  it("rejects a list containing another tenant's artifacts/ path", () => {
+    const r = parseInputArtifacts(
+      [{ repoPath: "user-uploads/a.stl" }, { repoPath: "artifacts/company-B/b.stl" }],
+      CO,
+    );
+    expect("error" in r).toBe(true);
   });
 
   it("rejects over the count cap", () => {
     const many = Array.from({ length: MAX_INPUT_FILES + 1 }, (_, i) => ({ repoPath: `user-uploads/f${i}.stl` }));
-    expect("error" in parseInputArtifacts(many)).toBe(true);
+    expect("error" in parseInputArtifacts(many, CO)).toBe(true);
   });
 
   it("rejects non-array, bad item shape, and extra keys", () => {
-    expect("error" in parseInputArtifacts("nope")).toBe(true);
-    expect("error" in parseInputArtifacts([42])).toBe(true);
-    expect("error" in parseInputArtifacts([{ repoPath: "user-uploads/a.stl", extra: 1 }])).toBe(true);
+    expect("error" in parseInputArtifacts("nope", CO)).toBe(true);
+    expect("error" in parseInputArtifacts([42], CO)).toBe(true);
+    expect("error" in parseInputArtifacts([{ repoPath: "user-uploads/a.stl", extra: 1 }], CO)).toBe(true);
   });
 
   it("propagates the path allowlist error", () => {
-    const r = parseInputArtifacts([{ repoPath: "../escape" }]);
+    const r = parseInputArtifacts([{ repoPath: "../escape" }], CO);
     expect("error" in r).toBe(true);
   });
 
   it("rejects duplicate basenames that would clobber", () => {
-    const r = parseInputArtifacts([{ repoPath: "user-uploads/a.stl" }, { repoPath: "artifacts/x/a.stl" }]);
+    const r = parseInputArtifacts(
+      [{ repoPath: "user-uploads/a.stl" }, { repoPath: `artifacts/${CO}/a.stl` }],
+      CO,
+    );
     expect("error" in r).toBe(true);
   });
 });

@@ -45,6 +45,7 @@ import {
 import {
   parseInputArtifacts,
   fetchInputArtifacts,
+  assertSafeCompanyId,
   IntakeError,
   MAX_INPUT_FILES,
   MAX_TOTAL_INPUT_BYTES,
@@ -269,13 +270,17 @@ function validateFilename(value: string): string | null {
 
 /**
  * F1 layer 2: post-build assertion. Any input that survives the per-component
- * allowlist must, after POSIX normalization, still start with "artifacts/" and
- * be byte-identical to the un-normalized form. Fail-closed on any drift.
+ * allowlist must, after POSIX normalization, still start with the caller's
+ * tenant prefix `artifacts/<companyId>/` (PLA-1099 SE-1) and be byte-identical to
+ * the un-normalized form. Fail-closed on any drift.
  */
-function assertSafeRepoPath(repoPath: string): string | null {
+function assertSafeRepoPath(repoPath: string, companyId: string): string | null {
   const normalized = path.posix.normalize(repoPath);
   if (normalized !== repoPath) return "internal: repoPath would normalize differently (path traversal blocked)";
-  if (!normalized.startsWith("artifacts/")) return "internal: repoPath must start with 'artifacts/'";
+  const tenantPrefix = `artifacts/${companyId}/`;
+  if (!normalized.startsWith(tenantPrefix)) {
+    return `internal: repoPath must start with '${tenantPrefix}' (tenant scoping)`;
+  }
   return null;
 }
 
@@ -508,7 +513,8 @@ const plugin = definePlugin({
                   repoPath: {
                     type: "string",
                     description:
-                      "Path of an uploaded scan in the cad-artifacts repo (under user-uploads/ or artifacts/). " +
+                      "Path of an uploaded scan in the cad-artifacts repo (under user-uploads/, or your own tenant's " +
+                      "artifacts/<companyId>/ subtree — cross-tenant artifacts/ paths are rejected). " +
                       "Fetched by the host and staged into the sandbox at inputs/<basename>; read it via StlAPI_Reader('inputs/<basename>').",
                   },
                 },
@@ -580,7 +586,10 @@ const plugin = definePlugin({
         // export PAT (binary-safe, size-capped) BEFORE rendering. Any failure is
         // a structured tool error — never silent, never a partial input set.
         let inputFiles: InputFile[] = [];
-        const parsedInputs = parseInputArtifacts(p.inputArtifacts);
+        // PLA-1099 SE-1: scope intake to the caller's tenant subtree. companyId
+        // is proven non-empty by the tenant-context gate above; the intake
+        // allowlist re-validates it and fails closed if it is malformed.
+        const parsedInputs = parseInputArtifacts(p.inputArtifacts, runCtx.companyId);
         if ("error" in parsedInputs) {
           const ms = Date.now() - t0;
           await emitMetrics(anyCtx, tool, ms, true);
@@ -840,15 +849,27 @@ const plugin = definePlugin({
         const filenameRaw = filename as string | undefined;
         // Default filename: artifact.<format>. format is enum-validated.
         const resolvedFilename = filenameRaw ?? `artifact.${format}`;
+        // PLA-1099 SE-1: write under the caller's tenant subtree. companyId is
+        // sourced from runCtx (never caller-supplied) and proven present by the
+        // staging-map lookup above; re-validate as a path segment, fail-closed.
+        const companyId = runCtx.companyId as string;
+        const cidErr = assertSafeCompanyId(companyId);
+        if (cidErr) {
+          ctx.logger.warn("cad.export: companyId assertion failed", { cidErr });
+          const ms = Date.now() - t0;
+          await emitMetrics(anyCtx, tool, ms, true);
+          logCompletion(ctx, tool, runCtx, ms, "error");
+          return validationError(`internal: ${cidErr}`);
+        }
         // resolvedFilename was either explicit (validated) or derived from the
         // enum format ("artifact.step" / "artifact.stl" / "artifact.3mf"); the
         // derived form is allowlist-safe by construction.
-        const repoPath = `artifacts/${ticketIdStr}/${toolCallIdStr}/${resolvedFilename}`;
+        const repoPath = `artifacts/${companyId}/${ticketIdStr}/${toolCallIdStr}/${resolvedFilename}`;
         // F1 layer 2 — fail-closed if anything would normalize to a different
-        // path or escape the artifacts/ subtree. Defence-in-depth: should be
-        // unreachable after the allowlist regexes, but the assertion is the
-        // authoritative guard.
-        const pathErr = assertSafeRepoPath(repoPath);
+        // path or escape the artifacts/<companyId>/ subtree. Defence-in-depth:
+        // should be unreachable after the allowlist regexes, but the assertion is
+        // the authoritative guard.
+        const pathErr = assertSafeRepoPath(repoPath, companyId);
         if (pathErr) {
           ctx.logger.warn("cad.export: repoPath assertion failed", { pathErr });
           const ms = Date.now() - t0;
