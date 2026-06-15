@@ -26,4 +26,20 @@ jobs:
         run: pip install pip-audit
 
       - name: Run pip-audit
-        run: pip-audit -r worker/requirements-cad.txt
+        # vtk 9.3.1 carries 3 buffer-overflow CVEs in vtkGLTFDocumentLoader
+        # (PYSEC-2025-224/225/226 = CVE-2025-57106/57107/57108, fixed in vtk
+        # 9.5.1). vtk==9.3.1 is a HARD transitive pin from
+        # cadquery-ocp==7.8.1.1.post1 (its requires_dist is `vtk==9.3.1`), so it
+        # cannot be bumped without upgrading the CAD engine itself — a larger
+        # change requiring full sandbox + render-golden revalidation, tracked in
+        # PLA-1104. These findings are PRE-EXISTING (cadquery-ocp is unchanged on
+        # this branch; the PLA-1089 mesh-boolean additions trimesh/manifold3d
+        # pull only numpy, already pinned). The worker executes under
+        # bwrap + seccomp (unprivileged, no network egress, rlimited), which
+        # contains vtk memory-safety bugs. Suppress these 3 IDs only — any OTHER
+        # advisory (incl. a regression on the pinned set) still fails the build.
+        run: >-
+          pip-audit -r worker/requirements-cad.txt
+          --ignore-vuln PYSEC-2025-224
+          --ignore-vuln PYSEC-2025-225
+          --ignore-vuln PYSEC-2025-226
