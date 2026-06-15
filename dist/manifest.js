@@ -4,7 +4,7 @@ var SECCOMP_LOADER_SHA256_PIN = "0fc1b58d38895fb2dc7be1464b1230344530aa7f168af94
 var manifest = {
   id: "platform.cad",
   apiVersion: 1,
-  version: "0.1.10",
+  version: "0.1.12",
   displayName: "CAD (CadQuery)",
   description: "Lets agents design and export 3D CAD models via CadQuery tool calls. v0.1.0 surface: cad.run_script (execute Python \u2192 staged artifact) and cad.export (staged artifact \u2192 GitHub commit + permalink). Operator-confirmed via approval f420bc31.",
   author: "Platform",
@@ -54,6 +54,16 @@ var manifest = {
         type: "string",
         format: "secret-ref",
         description: "Paperclip secret UUID for the GitHub PAT used to push CAD artifacts. Create the secret in the board UI and paste its UUID here."
+      },
+      // PLA-1094 separation-of-duties: optional read-only intake token. When
+      // unset, intake falls back to githubPatSecretId (byte-identical to the
+      // pre-1094 shared-PAT behaviour). Declared here because the schema is
+      // additionalProperties:false — an undeclared optional key would be
+      // rejected at host load. NOT in `required`.
+      intakePatSecretId: {
+        type: "string",
+        format: "secret-ref",
+        description: "Optional Paperclip secret UUID for a Contents:Read-only GitHub PAT used ONLY by the inputArtifacts intake-fetch path. Falls back to githubPatSecretId when unset; export always uses githubPatSecretId."
       },
       artifactRepoUrl: {
         type: "string",

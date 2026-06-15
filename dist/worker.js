@@ -7978,6 +7978,17 @@ var DEFAULT_INTAKE_CAPS = {
   maxTotalBytes: MAX_TOTAL_INPUT_BYTES
 };
 var INTAKE_ALLOWED_PREFIXES = ["user-uploads/", "artifacts/"];
+var ENFORCE_USER_UPLOADS_TENANT_SCOPING = false;
+var COMPANY_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+function assertSafeCompanyId(companyId) {
+  if (typeof companyId !== "string" || companyId.length === 0) {
+    return "callerCompanyId must be a non-empty string";
+  }
+  if (!COMPANY_ID_RE.test(companyId)) {
+    return "callerCompanyId has disallowed characters (allowed: A-Za-z0-9._-, no leading dot)";
+  }
+  return null;
+}
 var IntakeError = class extends Error {
   kind;
   httpStatus;
@@ -7989,7 +8000,7 @@ var IntakeError = class extends Error {
   }
 };
 var BASENAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-function assertSafeIntakePath(repoPath) {
+function assertSafeIntakePath(repoPath, callerCompanyId, opts = {}) {
   if (typeof repoPath !== "string" || repoPath.length === 0) {
     return "repoPath must be a non-empty string";
   }
@@ -8017,9 +8028,25 @@ function assertSafeIntakePath(repoPath) {
   if (!BASENAME_RE.test(base)) {
     return "repoPath basename has disallowed characters (allowed: A-Za-z0-9._-, no leading dot)";
   }
+  const cidErr = assertSafeCompanyId(callerCompanyId);
+  if (cidErr) return `internal: ${cidErr}`;
+  if (normalized.startsWith("artifacts/")) {
+    const tenantPrefix = `artifacts/${callerCompanyId}/`;
+    if (!normalized.startsWith(tenantPrefix)) {
+      return `repoPath under 'artifacts/' must be within your tenant subtree '${tenantPrefix}' (cross-tenant read blocked)`;
+    }
+  } else if (normalized.startsWith("user-uploads/")) {
+    const enforce = opts.enforceUserUploadsScoping ?? ENFORCE_USER_UPLOADS_TENANT_SCOPING;
+    if (enforce) {
+      const tenantPrefix = `user-uploads/${callerCompanyId}/`;
+      if (!normalized.startsWith(tenantPrefix)) {
+        return `repoPath under 'user-uploads/' must be within your tenant subtree '${tenantPrefix}' (cross-tenant read blocked)`;
+      }
+    }
+  }
   return null;
 }
-function parseInputArtifacts(raw) {
+function parseInputArtifacts(raw, callerCompanyId, opts = {}) {
   if (raw === void 0 || raw === null) return { repoPaths: [] };
   if (!Array.isArray(raw)) return { error: "inputArtifacts must be an array" };
   if (raw.length === 0) return { repoPaths: [] };
@@ -8038,7 +8065,7 @@ function parseInputArtifacts(raw) {
       return { error: `inputArtifacts[${i}] has unexpected keys (only 'repoPath' allowed)` };
     }
     const repoPath = item.repoPath;
-    const err = assertSafeIntakePath(repoPath);
+    const err = assertSafeIntakePath(repoPath, callerCompanyId, opts);
     if (err) return { error: `inputArtifacts[${i}].${err}` };
     const base = path2.posix.basename(repoPath);
     if (seenBasenames.has(base)) {
@@ -8661,10 +8688,13 @@ function validateFilename(value) {
   }
   return null;
 }
-function assertSafeRepoPath(repoPath) {
+function assertSafeRepoPath(repoPath, companyId) {
   const normalized = path3.posix.normalize(repoPath);
   if (normalized !== repoPath) return "internal: repoPath would normalize differently (path traversal blocked)";
-  if (!normalized.startsWith("artifacts/")) return "internal: repoPath must start with 'artifacts/'";
+  const tenantPrefix = `artifacts/${companyId}/`;
+  if (!normalized.startsWith(tenantPrefix)) {
+    return `internal: repoPath must start with '${tenantPrefix}' (tenant scoping)`;
+  }
   return null;
 }
 function encodeRepoPathForUrl2(repoPath) {
@@ -8844,7 +8874,7 @@ var plugin = definePlugin({
                 properties: {
                   repoPath: {
                     type: "string",
-                    description: "Path of an uploaded scan in the cad-artifacts repo (under user-uploads/ or artifacts/). Fetched by the host and staged into the sandbox at inputs/<basename>; read it via StlAPI_Reader('inputs/<basename>')."
+                    description: "Path of an uploaded scan in the cad-artifacts repo (under user-uploads/, or your own tenant's artifacts/<companyId>/ subtree \u2014 cross-tenant artifacts/ paths are rejected). Fetched by the host and staged into the sandbox at inputs/<basename>; read it via StlAPI_Reader('inputs/<basename>')."
                   }
                 },
                 required: ["repoPath"],
@@ -8899,7 +8929,7 @@ var plugin = definePlugin({
           return validationError("missing tenant context (companyId/agentId) on runCtx");
         }
         let inputFiles = [];
-        const parsedInputs = parseInputArtifacts(p.inputArtifacts);
+        const parsedInputs = parseInputArtifacts(p.inputArtifacts, runCtx.companyId);
         if ("error" in parsedInputs) {
           const ms2 = Date.now() - t0;
           await emitMetrics(anyCtx, tool, ms2, true);
@@ -8908,16 +8938,17 @@ var plugin = definePlugin({
         }
         if (parsedInputs.repoPaths.length > 0) {
           const config = await ctx.config.get();
-          if (!config.githubPatSecretId) {
+          const intakeSecretId = config.intakePatSecretId ?? config.githubPatSecretId;
+          if (!intakeSecretId) {
             const ms2 = Date.now() - t0;
             await emitMetrics(anyCtx, tool, ms2, true);
             logCompletion(ctx, tool, runCtx, ms2, "error");
-            return { data: { error: "prerequisite_missing", message: "inputArtifacts requires githubPatSecretId to be configured." } };
+            return { data: { error: "prerequisite_missing", message: "inputArtifacts requires githubPatSecretId (or intakePatSecretId) to be configured." } };
           }
           const repoUrl = config.artifactRepoUrl ?? DEFAULT_ARTIFACT_REPO_URL;
           const branch = config.artifactRepoBranch ?? DEFAULT_ARTIFACT_BRANCH;
-          ctx.logger.info("cad.run_script: fetching inputArtifacts", { count: parsedInputs.repoPaths.length });
-          const pat = await ctx.secrets.resolve(config.githubPatSecretId);
+          ctx.logger.info("cad.run_script: fetching inputArtifacts", { count: parsedInputs.repoPaths.length, intakePat: config.intakePatSecretId ? "dedicated" : "shared" });
+          const pat = await ctx.secrets.resolve(intakeSecretId);
           try {
             inputFiles = await fetchInputArtifacts(pat, repoUrl, branch, parsedInputs.repoPaths);
           } catch (err) {
@@ -9105,8 +9136,17 @@ var plugin = definePlugin({
         const toolCallIdStr = toolCallId;
         const filenameRaw = filename;
         const resolvedFilename = filenameRaw ?? `artifact.${format}`;
-        const repoPath = `artifacts/${ticketIdStr}/${toolCallIdStr}/${resolvedFilename}`;
-        const pathErr = assertSafeRepoPath(repoPath);
+        const companyId = runCtx.companyId;
+        const cidErr = assertSafeCompanyId(companyId);
+        if (cidErr) {
+          ctx.logger.warn("cad.export: companyId assertion failed", { cidErr });
+          const ms = Date.now() - t0;
+          await emitMetrics(anyCtx, tool, ms, true);
+          logCompletion(ctx, tool, runCtx, ms, "error");
+          return validationError(`internal: ${cidErr}`);
+        }
+        const repoPath = `artifacts/${companyId}/${ticketIdStr}/${toolCallIdStr}/${resolvedFilename}`;
+        const pathErr = assertSafeRepoPath(repoPath, companyId);
         if (pathErr) {
           ctx.logger.warn("cad.export: repoPath assertion failed", { pathErr });
           const ms = Date.now() - t0;
