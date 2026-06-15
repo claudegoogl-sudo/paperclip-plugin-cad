@@ -141,7 +141,7 @@ describe.skipIf(!HAS_BWRAP)("PLA-1089 Ask 2 — mesh-boolean under bwrap+seccomp
     if (r.ok) expect(r.artifactPath).toBeTruthy();
   }, T);
 
-  it("neutralises the trimesh subprocess shell-out gadget (no sandbox escape)", async (ctx) => {
+  it("neutralises the trimesh subprocess + os shell-out gadgets (no sandbox escape)", async (ctx) => {
     if (!MESH_OK) return ctx.skip(MESH_SKIP_REASON);
 
     const r = await run(
@@ -164,11 +164,26 @@ describe.skipIf(!HAS_BWRAP)("PLA-1089 Ask 2 — mesh-boolean under bwrap+seccomp
         "    except PermissionError:",
         "        pass",
         '    assert not escaped, "subprocess leak OPEN via " + h.__name__',
+        // PLA-1091: the `os` global is scrubbed with the same predicate, so a
+        // captured real-os reference (e.g. trimesh.exchange.binvox.os.system)
+        // cannot be reached. A submodule that bound no real os (h.os is None on
+        // this trimesh build, e.g. exchange.ply) has nothing to scrub — skip it.
+        "for h in holders:",
+        '    og = getattr(h, "os", None)',
+        "    if og is None:",
+        "        continue",
+        "    os_escaped = False",
+        "    try:",
+        "        og.system",
+        "        os_escaped = True",
+        "    except PermissionError:",
+        "        pass",
+        '    assert not os_escaped, "os leak OPEN via " + h.__name__',
         'result = cq.Workplane("XY").box(1, 1, 1)',
       ].join("\n"),
     );
 
-    // ok === true means the assert held (leak closed) and export succeeded.
+    // ok === true means both asserts held (leaks closed) and export succeeded.
     expect(r.ok, JSON.stringify(r)).toBe(true);
   }, T);
 });
