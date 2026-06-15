@@ -407,9 +407,6 @@ jobs:
               body,
             });
 
-      - name: Run perf tests (PLA-106 §6.2 gates)
-        run: npx vitest run --config ./vitest.config.ts src/sandbox.bwrap.perf.test.ts
-
       - name: Run mesh-boolean sandbox-compat suite (PLA-1089 Ask 2 / PLA-1090 SE-3)
         # PLA-1090 SE-3: the BLOCKING "native mesh code is sandbox-safe / no
         # SIGSYS / no filter widening" sign-off is worthless if the proving test
@@ -420,6 +417,11 @@ jobs:
         # cannot pass this gate; the two `mesh-boolean under bwrap+seccomp` cases
         # execute non-skipped. Tee the output so the failure tail surfaces through
         # the public, unauthenticated comments API (no actions:read needed).
+        #
+        # PLA-1097: this SE-3 proof runs BEFORE the §6.2 perf gate so it always
+        # EXECUTES — the perf gate is a timing measurement that can flake on a
+        # slow shared runner, and SE-3 requires these cases to run, not be
+        # skipped behind an unrelated gate. The perf gate follows below.
         run: |
           set -o pipefail
           npx vitest run --config ./vitest.config.ts src/worker.mesh-boolean.test.ts 2>&1 | tee evidence/mesh-boolean.log
@@ -452,3 +454,22 @@ jobs:
               issue_number: context.payload.pull_request.number,
               body,
             });
+
+      - name: Capture dev_direct perf baseline (PLA-114 §6.2 — writes perf-baseline.json)
+        # PLA-1097: the §6.2 perf gate measures the bwrap+seccomp cold-start
+        # *adder* (overhead vs a dev_direct baseline, ≤100 ms p95) — a
+        # runner-variance-robust relative gate, because the dominant ~2 s
+        # CadQuery import is in both measurements and cancels in the diff. The
+        # perf test (src/sandbox.bwrap.perf.test.ts, docstring lines 18-22 +
+        # 167-176) is DESIGNED for CI to do both runs back-to-back: this run sets
+        # CAD_WORKER_PERF_BASELINE=1 to capture the dev_direct baseline (the
+        # bwrap gate self-skips under that env), then the gate run below reads it.
+        # Without this step the gate fell back to a hard absolute 2000 ms ceiling
+        # that GH shared runners legitimately exceed (~2050-2090 ms), failing
+        # every run regardless of code — a pre-existing CI miscalibration, not a
+        # regression. Capturing the baseline on the SAME runner restores the
+        # spec-intended relative gate.
+        run: CAD_WORKER_UNSAFE_DEV=1 CAD_WORKER_PERF_BASELINE=1 npx vitest run --config ./vitest.config.ts src/sandbox.bwrap.perf.test.ts
+
+      - name: Run perf tests (PLA-106 §6.2 gates)
+        run: npx vitest run --config ./vitest.config.ts src/sandbox.bwrap.perf.test.ts
