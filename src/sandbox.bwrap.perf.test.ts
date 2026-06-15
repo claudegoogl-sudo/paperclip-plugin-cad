@@ -108,6 +108,28 @@ const STEADY_BAND = 0.05;
 const P50_ADDER_CEILING_MS = 165;
 
 /**
+ * §6.3 worst-observed cold-start adder ceiling (ms).
+ *
+ * PLA-1109: the original §6.3 grace check gated `bwrap.max − dev_direct.p50`
+ * — a bwrap *max* minus a baseline *median*. On GH-hosted runners one slow
+ * CadQuery-import iteration (the ~2.1 s import varies run-to-run) is charged
+ * entirely to "bwrap overhead", so the statistic is a high-variance max-of-N
+ * contaminated by import noise: it red ~1-in-6 normal runs (412.5 ms vs a
+ * ~155–279 ms norm) and cannot be deterministically green. This is the same
+ * median-vs-noise contamination PLA-1097/e763fed removed from the p50 path.
+ *
+ * We instead gate the *interleaved per-iteration* worst adder
+ * `max(bwrap_i − dev_i)` over the PLA-1097 paired samples: each bwrap sample
+ * is differenced against the dev_direct sample measured immediately after it,
+ * so import variance shared by the adjacent pair cancels and the statistic
+ * reflects true fixed-cost sandbox overhead. A genuine fixed-cost regression
+ * shifts every paired diff, so the gate stays sensitive. Value = (max
+ * worst-per-iter adder observed across the characterization runs) × 1.5,
+ * rounded up to the nearest 25, sanity-clamped ≤ 400 (CTO decision, PLA-1109).
+ */
+const WORST_ITER_ADDER_CEILING_MS = 400;
+
+/**
  * Hard absolute ceiling used when no baseline file is present. Derived from
  * the §6.3 BWRAP_OVERHEAD_GRACE_MS budget plus a generous CadQuery startup
  * envelope (a trivial Workplane().box() round-trip is ≈ 600–900 ms on the
@@ -270,7 +292,8 @@ describe.skipIf(!HAS_BWRAP || CAPTURE_BASELINE)(
 
     it(
       `N=${N} cold-start: p95 adder ≤ ${P95_ADDER_CEILING_MS} ms, p99 ≤ ${P99_ADDER_CEILING_MS} ms; ` +
-        `steady-state p50 adder ≤ ${P50_ADDER_CEILING_MS} ms vs baseline`,
+        `steady-state p50 adder ≤ ${P50_ADDER_CEILING_MS} ms vs baseline; ` +
+        `worst-per-iter adder ≤ ${WORST_ITER_ADDER_CEILING_MS} ms`,
       async () => {
         // PLA-1097: build a dev_direct decision in THIS process so the
         // baseline can be measured interleaved with the bwrap samples (see
@@ -381,15 +404,31 @@ describe.skipIf(!HAS_BWRAP || CAPTURE_BASELINE)(
         // §6.3 — confirm the BWRAP_OVERHEAD_GRACE_MS budget is sufficient.
         // The grace is added to per-request timeouts; if our worst observed
         // bwrap-only overhead would blow it, the production timeout headroom
-        // is wrong.
-        if (baseline) {
+        // is wrong. We measure the worst *interleaved per-iteration* adder
+        // (see WORST_ITER_ADDER_CEILING_MS) so a single slow CadQuery-import
+        // iteration is not mis-attributed to sandbox overhead.
+        if (devDecision && devSamples.length === samples.length) {
+          let worstIterAdder = -Infinity;
+          for (let i = 0; i < samples.length; i++) {
+            const a = samples[i] - devSamples[i];
+            if (a > worstIterAdder) worstIterAdder = a;
+          }
+          // eslint-disable-next-line no-console
+          console.log(
+            `[perf] worst-per-iter adder max(bwrap_i - dev_i)=${worstIterAdder.toFixed(1)}ms (n=${samples.length})`,
+          );
+          expect(
+            worstIterAdder,
+            `worst-per-iteration adder ${worstIterAdder.toFixed(1)}ms exceeds ${WORST_ITER_ADDER_CEILING_MS}ms ceiling (§6.3)`,
+          ).toBeLessThanOrEqual(WORST_ITER_ADDER_CEILING_MS);
+        } else if (baseline) {
+          // Non-interleaved fallback (no paired dev samples, e.g. baseline
+          // loaded from file): retain the original cross-statistic worst check.
           const worstAdder = bw.max - baseline.p50;
           expect(
             worstAdder,
             `worst-observed adder ${worstAdder.toFixed(1)}ms exceeds BWRAP_OVERHEAD_GRACE_MS=${BWRAP_OVERHEAD_GRACE_MS}ms (§6.3)`,
           ).toBeLessThanOrEqual(BWRAP_OVERHEAD_GRACE_MS * 4);
-          // Note: ×4 = the 5 s SIGKILL grace pad. If this fails the §6.3 grace
-          // is too tight — escalate to spec revision rather than papering over.
         }
       },
       SUITE_TIMEOUT_MS,
