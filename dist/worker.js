@@ -8595,6 +8595,15 @@ function enforceRetainedInputCap(map = artifactStagingMap, cap = MAX_RETAINED_IN
     total -= freed;
   }
 }
+var MAX_STAGING_ENTRIES = 256;
+function enforceStagingEntryCap(map = artifactStagingMap, cap = MAX_STAGING_ENTRIES) {
+  if (map.size <= cap) return;
+  for (const key of map.keys()) {
+    if (map.size <= cap) break;
+    map.delete(key);
+  }
+}
+var MAX_SCRIPT_BYTES = 256 * 1024;
 function stagingMapKey(companyId, agentId, artifactId) {
   return `${companyId}:${agentId}:${artifactId}`;
 }
@@ -8825,7 +8834,7 @@ var plugin = definePlugin({
         parametersSchema: {
           type: "object",
           properties: {
-            script: { type: "string", description: "CadQuery Python script." },
+            script: { type: "string", maxLength: MAX_SCRIPT_BYTES, description: "CadQuery Python script (max 256 KiB)." },
             timeout: { type: "integer", minimum: 1, maximum: 300, description: "Timeout (seconds, default 30)." },
             inputArtifacts: {
               type: "array",
@@ -8864,6 +8873,12 @@ var plugin = definePlugin({
           await emitMetrics(anyCtx, tool, ms2, true);
           logCompletion(ctx, tool, runCtx, ms2, "error");
           return validationError("script is required and must be a non-empty string");
+        }
+        if (Buffer.byteLength(p.script, "utf8") > MAX_SCRIPT_BYTES) {
+          const ms2 = Date.now() - t0;
+          await emitMetrics(anyCtx, tool, ms2, true);
+          logCompletion(ctx, tool, runCtx, ms2, "error");
+          return validationError(`script exceeds maximum size of ${MAX_SCRIPT_BYTES} bytes`);
         }
         if (p.timeout !== void 0) {
           const t = p.timeout;
@@ -8933,6 +8948,7 @@ var plugin = definePlugin({
           stagingMapKey(runCtx.companyId, runCtx.agentId, artifactId),
           { script, stepPath, inputs: inputFiles.length > 0 ? inputFiles : void 0 }
         );
+        enforceStagingEntryCap();
         enforceRetainedInputCap();
         ctx.logger.info("cad.run_script: staged", { artifactId });
         const ms = Date.now() - t0;
@@ -9179,7 +9195,10 @@ var worker_default = plugin;
 runWorker(plugin, import.meta.url);
 export {
   MAX_RETAINED_INPUT_BYTES,
+  MAX_SCRIPT_BYTES,
+  MAX_STAGING_ENTRIES,
   worker_default as default,
-  enforceRetainedInputCap
+  enforceRetainedInputCap,
+  enforceStagingEntryCap
 };
 //# sourceMappingURL=worker.js.map

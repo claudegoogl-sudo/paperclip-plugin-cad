@@ -124,6 +124,41 @@ export function enforceRetainedInputCap(
   }
 }
 
+// PLA-1101: enforceRetainedInputCap (SE-2) bounds only retained `.inputs` bytes;
+// it never removes a whole entry, so the staging map's ENTRY COUNT is still
+// unbounded. Every run_script call inserts an entry keyed by a fresh artifactId
+// and the only later mutation is `.inputs = undefined`. Across the long-lived,
+// tenant-shared worker, a loop of run_script calls (even zero-input ones, whose
+// retained `script` string SE-2 does not count) grows the map and its retained
+// script bytes without bound — a slower cross-tenant DoS. Cap the entry count and
+// evict whole oldest entries (Map iterates in insertion order, so the just-staged
+// newest entry survives as long as the cap is >= 1). A later cad.export on an
+// evicted artifactId falls through to the SAME "not found" path as a missing
+// entry — fails closed, no oracle, identical posture to the PLA-80 key mismatch.
+export const MAX_STAGING_ENTRIES = 256;
+
+export function enforceStagingEntryCap(
+  map: Map<string, StagingEntry> = artifactStagingMap,
+  cap: number = MAX_STAGING_ENTRIES,
+): void {
+  if (map.size <= cap) return;
+  // Map.keys() yields oldest-first; deleting already-/currently-visited keys
+  // during iteration is well-defined. Drop from the front until at the cap.
+  for (const key of map.keys()) {
+    if (map.size <= cap) break;
+    map.delete(key);
+  }
+}
+
+// PLA-1101: cap the per-call script size at intake. The retained `script` string
+// lives in the shared worker's staging entry, and SE-2's enforceRetainedInputCap
+// counts only `.inputs` bytes — so an uncapped multi-MB script survives every
+// SE-2 eviction. Real CadQuery scripts are KB-scale; 256 KiB is generous headroom
+// while bounding worst-case retained script memory to
+// MAX_STAGING_ENTRIES * MAX_SCRIPT_BYTES (64 MiB). Measured in UTF-8 bytes, not
+// JS string length, so multi-byte characters cannot smuggle past the cap.
+export const MAX_SCRIPT_BYTES = 256 * 1024; // 256 KiB
+
 function stagingMapKey(companyId: string, agentId: string, artifactId: string): string {
   return `${companyId}:${agentId}:${artifactId}`;
 }
@@ -458,7 +493,7 @@ const plugin = definePlugin({
         parametersSchema: {
           type: "object",
           properties: {
-            script: { type: "string", description: "CadQuery Python script." },
+            script: { type: "string", maxLength: MAX_SCRIPT_BYTES, description: "CadQuery Python script (max 256 KiB)." },
             timeout: { type: "integer", minimum: 1, maximum: 300, description: "Timeout (seconds, default 30)." },
             inputArtifacts: {
               type: "array",
@@ -502,6 +537,14 @@ const plugin = definePlugin({
           await emitMetrics(anyCtx, tool, ms, true);
           logCompletion(ctx, tool, runCtx, ms, "error");
           return validationError("script is required and must be a non-empty string");
+        }
+        // PLA-1101: reject oversized scripts before staging/rendering. Measured in
+        // UTF-8 bytes so multi-byte characters can't bypass the staging-memory cap.
+        if (Buffer.byteLength(p.script, "utf8") > MAX_SCRIPT_BYTES) {
+          const ms = Date.now() - t0;
+          await emitMetrics(anyCtx, tool, ms, true);
+          logCompletion(ctx, tool, runCtx, ms, "error");
+          return validationError(`script exceeds maximum size of ${MAX_SCRIPT_BYTES} bytes`);
         }
         if (p.timeout !== undefined) {
           const t = p.timeout;
@@ -586,6 +629,9 @@ const plugin = definePlugin({
           stagingMapKey(runCtx.companyId, runCtx.agentId, artifactId),
           { script, stepPath, inputs: inputFiles.length > 0 ? inputFiles : undefined },
         );
+        // PLA-1101: bound the staging map's entry count (whole-entry eviction)
+        // before the SE-2 input-byte cap trims `.inputs` on the survivors.
+        enforceStagingEntryCap();
         // PLA-1089 SE-2: bound total retained input bytes across the shared map.
         enforceRetainedInputCap();
         ctx.logger.info("cad.run_script: staged", { artifactId });
