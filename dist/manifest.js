@@ -141,4 +141,3 @@ export {
   SECCOMP_LOADER_SHA256_PIN,
   manifest_default as default
 };
-//# sourceMappingURL=manifest.js.map

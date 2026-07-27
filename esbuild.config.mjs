@@ -51,13 +51,19 @@ const versionDefine = {
   __PLUGIN_VERSION__: JSON.stringify(pkg.version),
 };
 
+// "external" rather than `true`: esbuild still writes dist/*.map for local
+// debugging, but omits the trailing sourceMappingURL footer from the bundles.
+// The maps inline every original TypeScript file (this plugin's source plus
+// the host packages it bundles), and package.json ships dist/ verbatim, so
+// with `true` the published tarball carried our full source. The files
+// negation in package.json keeps the maps out of the package.
 const sharedOptions = {
   bundle: true,
   platform: "node",
   target: "node20",
   format: "esm",
   packages: "external",
-  sourcemap: true,
+  sourcemap: "external",
   define: versionDefine,
 };
 
