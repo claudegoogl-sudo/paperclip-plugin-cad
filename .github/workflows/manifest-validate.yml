@@ -19,6 +19,7 @@ on:
       - 'scripts/validate-manifest.mjs'
       - 'scripts/check-manifest-version.mjs'
       - 'src/validate-manifest.test.ts'
+      - 'src/no-published-sourcemaps.test.ts'
       - 'vitest.config.ts'
       - '.github/workflows/manifest-validate.yml'
   push:
@@ -34,6 +35,7 @@ on:
       - 'scripts/validate-manifest.mjs'
       - 'scripts/check-manifest-version.mjs'
       - 'src/validate-manifest.test.ts'
+      - 'src/no-published-sourcemaps.test.ts'
       - 'vitest.config.ts'
       - '.github/workflows/manifest-validate.yml'
 
@@ -79,3 +81,10 @@ jobs:
         # `npm run build`, but adding it as an explicit CI step gives
         # an unambiguous PR signal.
         run: npm run check:manifest-version
+
+      - name: Assert the packed tarball ships no sourcemaps
+        # Sourcemaps inline the full original TypeScript of everything the
+        # bundle pulls in. Release tarballs are public assets, so shipping
+        # the maps publishes that source. Maps stay on disk for local
+        # debugging; this fails the build if one reaches the tarball.
+        run: npx vitest run --config ./vitest.config.ts src/no-published-sourcemaps.test.ts

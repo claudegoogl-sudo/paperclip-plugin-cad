@@ -5,3 +5,4 @@ worker/seccomp_filter.bpf
 worker/seccomp_filter.bpf.sha256
 worker/cad_preexec
 perf-baseline.json
+dist/*.map

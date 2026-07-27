@@ -18,6 +18,7 @@
   },
   "files": [
     "dist/",
+    "!dist/**/*.map",
     "src/cad_worker.py",
     "src/manifest.ts",
     "src/cad-worker-client.ts",

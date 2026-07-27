@@ -971,4 +971,3 @@ runWorker(plugin, import.meta.url);
 export {
   worker_default as default
 };
-//# sourceMappingURL=worker.js.map
