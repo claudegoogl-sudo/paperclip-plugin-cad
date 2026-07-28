@@ -1,7 +1,7 @@
 import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
 
 /**
- * PLA-215 / PLA-114 §5.2 — exported pin constants for **runtime** sha256
+ * Exported pin constants for **runtime** sha256
  * verification.
  *
  * The literal placeholders below are substituted by `esbuild.config.mjs`
@@ -12,14 +12,14 @@ import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
  * verifier in `cad-worker-client.ts` reads these constants and refuses
  * to launch the worker on either a sha256 mismatch OR an unsubstituted
  * placeholder (length ≠ 64 hex chars). The dual placeholder substitution
- * is what closes the rev-4 §5.2 substitution-attack window — a build
+ * is what closes the substitution-attack window — a build
  * that fails to substitute is fail-closed at the first launch.
  */
 export const SECCOMP_FILTER_SHA256_PIN = "__PLA114_SECCOMP_FILTER_SHA256__";
 export const SECCOMP_LOADER_SHA256_PIN = "__PLA114_SECCOMP_LOADER_SHA256__";
 
 /**
- * PLA-114 / PLA-106 §5.2 — declare the kernel-sandbox requirement in the
+ * Declare the kernel-sandbox requirement in the
  * manifest. The host capability negotiation refuses to install the plugin
  * on a host that does not advertise this requirement met (bubblewrap on
  * PATH). The SDK manifest type does not yet model this field, so we extend
@@ -33,7 +33,7 @@ type ManifestWithRuntimeRequirements = PaperclipPluginManifestV1 & {
   };
   /**
    * Build-manifest pin for the seccomp filter blob AND the python-side
-   * loader shim (PLA-114 / PLA-106 §5.2 rev 4: pins **both**
+   * loader shim (pins **both**
    * `seccomp_filter.bpf` AND `seccomp_load.py`; runtime hard-errors on
    * either mismatch). The dual pin closes the substitution-attack window
    * where an attacker swaps the loader (which calls `prctl(PR_SET_SECCOMP)`)
@@ -53,9 +53,9 @@ type ManifestWithRuntimeRequirements = PaperclipPluginManifestV1 & {
 
 // `__PLUGIN_VERSION__` is substituted at build time from
 // `package.json.version` by esbuild's `define` (see `esbuild.config.mjs`).
-// PLA-526 made `package.json.version` the single source of truth so the
+// `package.json.version` is the single source of truth so the
 // installed plugin's reported version cannot drift from the package
-// version (PLA-443 was a manual-edit miss that this structural fix prevents).
+// version (a manual-edit miss in one and not the other would otherwise regress).
 const manifest: ManifestWithRuntimeRequirements = {
   id: "platform.cad",
   apiVersion: 1,
@@ -71,8 +71,8 @@ const manifest: ManifestWithRuntimeRequirements = {
 
   // Capabilities (v0.1.0):
   //   agent.tools.register — register cad.run_script and cad.export
-  //   http.outbound        — GitHub Contents API push (PLA-56)
-  //   secrets.read-ref     — ctx.secrets.resolve for GitHub PAT (PLA-47)
+  //   http.outbound        — GitHub Contents API push
+  //   secrets.read-ref     — ctx.secrets.resolve for GitHub PAT
   //   metrics.write        — ctx.metrics counters + duration histograms
   capabilities: [
     "agent.tools.register",
@@ -85,13 +85,13 @@ const manifest: ManifestWithRuntimeRequirements = {
     worker: "./dist/worker.js",
   },
 
-  // PLA-114 §5.2 — host-side kernel-sandbox capability negotiation.
+  // Host-side kernel-sandbox capability negotiation.
   runtimeRequirements: {
     kernelSandbox: "bubblewrap",
   },
 
-  // PLA-114 acceptance — pin the seccomp filter blob digest AND the
-  // python-side loader shim digest (rev-4 §5.2 dual pin). The build
+  // Pin the seccomp filter blob digest AND the
+  // python-side loader shim digest (dual pin). The build
   // script reads `worker/seccomp_filter.bpf.sha256` (produced by
   // `make -C worker`) and computes sha256 of `worker/seccomp_load.py`,
   // substituting both values at build time. Literals below are
@@ -107,9 +107,9 @@ const manifest: ManifestWithRuntimeRequirements = {
     seccompLoaderSha256: "__PLA114_SECCOMP_LOADER_SHA256__",
   },
 
-  // instanceConfigSchema — ties secret-scope strictly to githubPatSecretId
-  // (PLA-41 remediation #2). Fields validated by the host before plugin load.
-  // PLA-74 F3: additionalProperties:false so unknown keys are rejected at host
+  // instanceConfigSchema — ties secret-scope strictly to githubPatSecretId.
+  // Fields validated by the host before plugin load.
+  // additionalProperties:false so unknown keys are rejected at host
   // load time rather than silently ignored (fail-closed).
   instanceConfigSchema: {
     type: "object",
@@ -126,7 +126,7 @@ const manifest: ManifestWithRuntimeRequirements = {
         description:
           "HTTPS clone URL of the GitHub repository where CAD artifacts are stored. " +
           "Defaults to https://github.com/claudegoogl-sudo/cad-artifacts.git. " +
-          "Operator must pre-create this repo; the plugin is push-only (PLA-56 AC#2).",
+          "Operator must pre-create this repo; the plugin is push-only.",
       },
       artifactRepoBranch: {
         type: "string",
@@ -185,7 +185,7 @@ const manifest: ManifestWithRuntimeRequirements = {
           },
           format: {
             type: "string",
-            // PLA-443 — DR laser-fab ask: dxf/svg are 2D vector outputs.
+            // dxf/svg are 2D vector outputs.
             // DXF requires the script's `result` be a 2D Workplane (wires/faces);
             // SVG works for both 2D Workplanes and 3D shapes (projected view).
             enum: ["step", "stl", "3mf", "dxf", "svg"],
@@ -193,11 +193,11 @@ const manifest: ManifestWithRuntimeRequirements = {
           },
           paperclipTicketId: {
             type: "string",
-            // PLA-74 F1/F2 — allowlist regex; rejects path traversal and
+            // Allowlist regex; rejects path traversal and
             // commit-message injection at the host's schema-validation gate.
             pattern: "^[A-Z][A-Z0-9]{1,9}-[0-9]{1,9}$",
             description:
-              "Paperclip ticket ID (e.g. PLA-56). Used in artifact path and commit message.",
+              "Paperclip ticket ID (e.g. ABC-123). Used in artifact path and commit message.",
           },
           toolCallId: {
             type: "string",
@@ -213,7 +213,7 @@ const manifest: ManifestWithRuntimeRequirements = {
           },
         },
         required: ["artifactId", "format", "paperclipTicketId", "toolCallId"],
-        // PLA-74 F3 — fail-closed on unknown fields; matches cad.run_script.
+        // Fail-closed on unknown fields; matches cad.run_script.
         additionalProperties: false,
       },
     },

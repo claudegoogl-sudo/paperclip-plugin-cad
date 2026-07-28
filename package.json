@@ -11,6 +11,7 @@
     "test": "vitest run --config ./vitest.config.ts",
     "typecheck": "tsc --noEmit",
     "validate:manifest": "node ./scripts/validate-manifest.mjs",
+    "check:source-hygiene": "node ./scripts/check-source-hygiene.mjs",
     "check:manifest-version": "node ./scripts/check-manifest-version.mjs",
     "check:release-tarball": "node ./scripts/check-release-tarball.mjs --keep",
     "check:release-tarball:self-test": "node ./scripts/check-release-tarball.mjs --self-test",

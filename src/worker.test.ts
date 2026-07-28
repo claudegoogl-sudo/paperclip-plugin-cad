@@ -1,6 +1,6 @@
 /**
- * Tests for PLA-55 (cad.run_script + cad.export tool API surface) and
- * PLA-56 (artifact persistence pipeline — AC6 happy path updated for GitHub commit).
+ * Tests for the cad.run_script + cad.export tool API surface and the
+ * artifact persistence pipeline (AC6 happy path updated for GitHub commit).
  *
  * Acceptance criteria covered:
  *   AC1  Both tools registered via ctx.tools.register.
@@ -282,7 +282,7 @@ describe("AC5: error taxonomy — worker_internal", () => {
 });
 
 // ---------------------------------------------------------------------------
-// AC6: Happy path — run_script → export (PLA-56: GitHub commit result)
+// AC6: Happy path — run_script → export (GitHub commit result)
 // ---------------------------------------------------------------------------
 
 describe("AC6: stub worker happy path", () => {

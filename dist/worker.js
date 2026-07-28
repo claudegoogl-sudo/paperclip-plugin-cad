@@ -13,7 +13,7 @@ import { execSync } from "node:child_process";
 import { createHash } from "node:crypto";
 
 // src/manifest.ts
-var SECCOMP_FILTER_SHA256_PIN = "6bdbbc4fdfb3d80996c66a812df450c95043a86364fe8955651ec867859617ba";
+var SECCOMP_FILTER_SHA256_PIN = "__PLA114_SECCOMP_FILTER_SHA256__";
 var SECCOMP_LOADER_SHA256_PIN = "0fc1b58d38895fb2dc7be1464b1230344530aa7f168af9478fa47153e20f8be0";
 
 // src/stub-cad-worker.ts
@@ -156,17 +156,17 @@ function verifySeccompPins(decision, pins = resolveDefaultPins()) {
   for (const c of checks) {
     if (c.pin.length !== SHA256_HEX_LEN) {
       throw new CadWorkerInternalError(
-        `[PLA-114 \xA75.2] ${c.name}: build manifest unsubstituted \u2014 pin length ${c.pin.length} \u2260 ${SHA256_HEX_LEN} (placeholder __PLA114_SECCOMP_*_SHA256__ still present?). Run \`npm run build\` so esbuild substitutes the digests.`
+        `Seccomp pin check for ${c.name}: build manifest unsubstituted \u2014 pin length ${c.pin.length} \u2260 ${SHA256_HEX_LEN} (placeholder __PLA114_SECCOMP_*_SHA256__ still present?). Run \`npm run build\` so esbuild substitutes the digests.`
       );
     }
     if (!SHA256_HEX_RE.test(c.pin)) {
       throw new CadWorkerInternalError(
-        `[PLA-114 \xA75.2] ${c.name}: build manifest pin is not a sha256 hex string: ${c.pin}`
+        `Seccomp pin check for ${c.name}: build manifest pin is not a sha256 hex string: ${c.pin}`
       );
     }
     if (!c.path) {
       throw new CadWorkerInternalError(
-        `[PLA-114 \xA75.2] ${c.name}: SpawnModeDecision is missing the path field \u2014 cannot verify pin.`
+        `Seccomp pin check for ${c.name}: SpawnModeDecision is missing the path field \u2014 cannot verify pin.`
       );
     }
     let actual;
@@ -174,12 +174,12 @@ function verifySeccompPins(decision, pins = resolveDefaultPins()) {
       actual = createHash("sha256").update(readFileSync(c.path)).digest("hex");
     } catch (err) {
       throw new CadWorkerInternalError(
-        `[PLA-114 \xA75.2] ${c.name}: failed to read for sha256 verification (path=${c.path}): ${err.message}`
+        `Seccomp pin check for ${c.name}: failed to read for sha256 verification (path=${c.path}): ${err.message}`
       );
     }
     if (actual.toLowerCase() !== c.pin.toLowerCase()) {
       throw new CadWorkerInternalError(
-        `[PLA-114 \xA75.2] ${c.name}: sha256 mismatch \u2014 manifest pin=${c.pin} actual=${actual} path=${c.path}. Refusing to launch worker; the kernel sandbox layer would be silently inert under this state (substitution-attack defense).`
+        `Seccomp pin check for ${c.name}: sha256 mismatch \u2014 manifest pin=${c.pin} actual=${actual} path=${c.path}. Refusing to launch worker; the kernel sandbox layer would be silently inert under this state (substitution-attack defense).`
       );
     }
   }
@@ -474,7 +474,7 @@ var TOOL_CALL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 var FILENAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 function validateTicketId(value) {
   if (!TICKET_ID_RE.test(value)) {
-    return "paperclipTicketId must match ^[A-Z][A-Z0-9]{1,9}-[0-9]{1,9}$ (e.g. PLA-56)";
+    return "paperclipTicketId must match ^[A-Z][A-Z0-9]{1,9}-[0-9]{1,9}$ (e.g. ABC-123)";
   }
   return null;
 }
@@ -549,14 +549,14 @@ async function checkRepoPrerequisite(pat, repoUrl) {
   if (resp.status === 404) {
     throw new PushError(
       "prerequisite_missing",
-      `Artifact repo not found (404): ${owner}/${repo}. Operator must pre-create the repo and grant PAT access. See PLA-56 AC#1.`,
+      `Artifact repo not found (404): ${owner}/${repo}. Operator must pre-create the repo and grant PAT access.`,
       404
     );
   }
   if (resp.status === 401 || resp.status === 403) {
     throw new PushError(
       "prerequisite_missing",
-      `Artifact repo not accessible (${resp.status}): ${owner}/${repo}. Verify PAT has repo scope. See PLA-56 AC#1.`,
+      `Artifact repo not accessible (${resp.status}): ${owner}/${repo}. Verify PAT has repo scope.`,
       resp.status
     );
   }
@@ -746,7 +746,7 @@ var plugin = definePlugin({
             artifactId: { type: "string", description: "Artifact ID from cad.run_script." },
             format: {
               type: "string",
-              // PLA-443 — keep enum in lockstep with manifest.ts; DR laser-fab
+              // Keep enum in lockstep with manifest.ts; DR laser-fab
               // ask added 2D vector outputs (dxf, svg) routed to CadQuery's
               // ExportTypes.DXF / ExportTypes.SVG in cad_worker.py.
               enum: ["step", "stl", "3mf", "dxf", "svg"],
@@ -755,7 +755,7 @@ var plugin = definePlugin({
             paperclipTicketId: {
               type: "string",
               pattern: "^[A-Z][A-Z0-9]{1,9}-[0-9]{1,9}$",
-              description: "Paperclip ticket ID (e.g. PLA-56) for path/commit message."
+              description: "Paperclip ticket ID (e.g. ABC-123) for path/commit message."
             },
             toolCallId: {
               type: "string",

@@ -1,28 +1,29 @@
 /**
- * CAD plugin worker — sub-goals 3 (PLA-55) + 5 (PLA-56)
+ * CAD plugin worker — script execution tool surface plus GitHub artifact
+ * persistence pipeline.
  *
  * Tool surface (operator-confirmed via approval f420bc31):
  *   cad.run_script  — execute CadQuery Python → staged artifact
  *   cad.export      — staged artifact → GitHub commit + permalink
  *
- * PLA-55 framework (AC2–AC6):
+ * Tool framework:
  *   - Input validation: structured validation_error (400) with no stack traces.
  *   - Metrics: ctx.metrics.write for tool.calls, tool.errors, tool.duration_ms.
  *   - Correlation log: "tool call complete" with correlationId/tool/agentId/status/durationMs.
  *   - No payload content in any log call.
  *
- * PLA-56 security rules:
+ * GitHub push security rules:
  *   - PAT resolved via ctx.secrets.resolve(config.githubPatSecretId) per call.
  *   - PAT never logged, stored, returned, or tagged in metrics.
  *   - PAT goes out of scope at function return.
  *
- * Push error taxonomy (PLA-56 AC4):
+ * Push error taxonomy:
  *   "auth"                 — 401/403: rotate PAT, no retry.
  *   "network"              — 5xx / network error / fetch timeout: transient, surface to agent.
  *   "conflict"             — 409/422: re-fetch SHA and retry once (inline).
  *   "prerequisite_missing" — repo 404/403: operator must pre-create repo.
  *
- * PLA-56 / PLA-74 SecurityEngineer review fixes (commit ba36ef1 review):
+ * Security review fixes (commit ba36ef1 review):
  *   F1 — Path-traversal allowlist on paperclipTicketId/toolCallId/filename,
  *        post-build path normalization assertion, per-segment URL encoding.
  *   F2 — Subsumed by F1 (allowlist excludes newlines + commit-message trailers).
@@ -35,7 +36,7 @@ import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
 import * as path from "node:path";
 
-// INTEGRATION SWITCH (sub-goal 2 / PLA-54): real CadQuery sandbox client.
+// INTEGRATION SWITCH: real CadQuery sandbox client.
 import {
   renderCadQuery,
   DEFAULT_TIMEOUT_SECONDS as WORKER_DEFAULT_TIMEOUT,
@@ -58,7 +59,7 @@ const DEFAULT_ARTIFACT_BRANCH = "main";
 // ---------------------------------------------------------------------------
 // Artifact staging map (cad.run_script → cad.export handoff)
 //
-// PLA-80 (F6): plugin workers are shared across all agents/companies on a host
+// Plugin workers are shared across all agents/companies on a host
 // (one worker per plugin per Paperclip instance — see plugin-worker-manager and
 // PLUGIN_SPEC.md §12). Keying the staging map by `artifactId` alone would let
 // agent B in company Y read agent A in company X's staged artifact if the id
@@ -80,7 +81,7 @@ function stagingMapKey(companyId: string, agentId: string, artifactId: string): 
 }
 
 // ---------------------------------------------------------------------------
-// Typed push errors (PLA-56)
+// Typed push errors
 // ---------------------------------------------------------------------------
 
 type PushErrorKind = "auth" | "network" | "conflict" | "prerequisite_missing";
@@ -97,7 +98,7 @@ class PushError extends Error {
 }
 
 // ---------------------------------------------------------------------------
-// PLA-55 structured error helpers
+// Structured error helpers
 // ---------------------------------------------------------------------------
 
 function validationError(message: string) {
@@ -109,7 +110,7 @@ function workerInternalError(message: string) {
 }
 
 // ---------------------------------------------------------------------------
-// PLA-55 metrics + correlation-log helpers
+// Metrics + correlation-log helpers
 // ---------------------------------------------------------------------------
 
 interface RunCtx {
@@ -157,7 +158,7 @@ const FILENAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 function validateTicketId(value: string): string | null {
   if (!TICKET_ID_RE.test(value)) {
-    return "paperclipTicketId must match ^[A-Z][A-Z0-9]{1,9}-[0-9]{1,9}$ (e.g. PLA-56)";
+    return "paperclipTicketId must match ^[A-Z][A-Z0-9]{1,9}-[0-9]{1,9}$ (e.g. ABC-123)";
   }
   return null;
 }
@@ -213,7 +214,7 @@ function fetchSignal(): AbortSignal {
 }
 
 // ---------------------------------------------------------------------------
-// GitHub API helpers (PLA-56)
+// GitHub API helpers
 // ---------------------------------------------------------------------------
 
 function githubHeaders(pat: string): Record<string, string> {
@@ -266,11 +267,11 @@ async function checkRepoPrerequisite(pat: string, repoUrl: string): Promise<void
   }
   if (resp.status === 404) {
     throw new PushError("prerequisite_missing",
-      `Artifact repo not found (404): ${owner}/${repo}. Operator must pre-create the repo and grant PAT access. See PLA-56 AC#1.`, 404);
+      `Artifact repo not found (404): ${owner}/${repo}. Operator must pre-create the repo and grant PAT access.`, 404);
   }
   if (resp.status === 401 || resp.status === 403) {
     throw new PushError("prerequisite_missing",
-      `Artifact repo not accessible (${resp.status}): ${owner}/${repo}. Verify PAT has repo scope. See PLA-56 AC#1.`, resp.status);
+      `Artifact repo not accessible (${resp.status}): ${owner}/${repo}. Verify PAT has repo scope.`, resp.status);
   }
   if (!resp.ok) {
     throw new PushError("network", `Unexpected ${resp.status} checking ${owner}/${repo}. Retry later.`, resp.status);
@@ -390,9 +391,9 @@ const plugin = definePlugin({
     // ------------------------------------------------------------------
     // cad.run_script (manifest tool name = "cad.run_script"; host parses the
     // namespaced name `platform.cad:cad.run_script` via lastIndexOf(":") and
-    // RPC-dispatches the worker with bare key "cad.run_script". PLA-374
-    // switched the public tool surface from `cad:<verb>` (rejected by the
-    // tightened PLA-163 manifest validator — `:` is not allowed) to
+    // RPC-dispatches the worker with bare key "cad.run_script". The public
+    // tool surface was switched from `cad:<verb>` (rejected by the
+    // tightened manifest validator — `:` is not allowed) to
     // `cad.<verb>` and the register keys here must follow.)
     // ------------------------------------------------------------------
     ctx.tools.register(
@@ -441,7 +442,7 @@ const plugin = definePlugin({
         const script = p.script as string;
         const timeoutSeconds = typeof p.timeout === "number" ? p.timeout : WORKER_DEFAULT_TIMEOUT;
 
-        // PLA-80 (F6): companyId+agentId are required to scope the staging map
+        // companyId+agentId are required to scope the staging map
         // entry to the calling tenant. Without them we cannot safely store the
         // artifact, since any later caller would match the un-scoped key.
         if (typeof runCtx.companyId !== "string" || runCtx.companyId.length === 0 ||
@@ -468,7 +469,7 @@ const plugin = definePlugin({
         }
 
         const artifactId = `cad-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        // PLA-80 (F6): key by tuple sourced from runCtx, never from agent input.
+        // Key by tuple sourced from runCtx, never from agent input.
         artifactStagingMap.set(
           stagingMapKey(runCtx.companyId, runCtx.agentId, artifactId),
           { script, stepPath },
@@ -487,11 +488,11 @@ const plugin = definePlugin({
     );
 
     // ------------------------------------------------------------------
-    // cad.export  (PLA-55 tool surface + PLA-56 GitHub commit pipeline)
+    // cad.export  (tool surface + GitHub commit pipeline)
     // Manifest tool name = "cad.export"; host parses
     // `platform.cad:cad.export` via lastIndexOf(":") and dispatches the
-    // worker with bare key "cad.export". PLA-374 dot-rename — the colon
-    // form is rejected by the PLA-163 manifest validator.
+    // worker with bare key "cad.export". The dot-rename — the colon
+    // form is rejected by the manifest validator.
     // ------------------------------------------------------------------
     ctx.tools.register(
       "cad.export",
@@ -506,7 +507,7 @@ const plugin = definePlugin({
             artifactId: { type: "string", description: "Artifact ID from cad.run_script." },
             format: {
               type: "string",
-              // PLA-443 — keep enum in lockstep with manifest.ts; DR laser-fab
+              // Keep enum in lockstep with manifest.ts; DR laser-fab
               // ask added 2D vector outputs (dxf, svg) routed to CadQuery's
               // ExportTypes.DXF / ExportTypes.SVG in cad_worker.py.
               enum: ["step", "stl", "3mf", "dxf", "svg"],
@@ -515,7 +516,7 @@ const plugin = definePlugin({
             paperclipTicketId: {
               type: "string",
               pattern: "^[A-Z][A-Z0-9]{1,9}-[0-9]{1,9}$",
-              description: "Paperclip ticket ID (e.g. PLA-56) for path/commit message.",
+              description: "Paperclip ticket ID (e.g. ABC-123) for path/commit message.",
             },
             toolCallId: {
               type: "string",
@@ -618,7 +619,7 @@ const plugin = definePlugin({
 
         ctx.logger.info("cad.export: starting", { artifactId, format });
 
-        // PLA-80 (F6): scoped lookup by (companyId, agentId, artifactId). If the
+        // Scoped lookup by (companyId, agentId, artifactId). If the
         // calling runCtx does not match the entry's caller, fall through to the
         // SAME error response as a genuinely missing entry — do not distinguish,
         // to avoid an oracle that lets one tenant probe another's id space.
@@ -637,7 +638,7 @@ const plugin = definePlugin({
           return workerInternalError(`No staged artifact for artifactId: ${artifactId}. Call cad.run_script first.`);
         }
 
-        // Local-file export path (no GitHub params — pre-PLA-56 compat / PLA-55 tests).
+        // Local-file export path (no GitHub params — used by local-only tests).
         if (!paperclipTicketId || !toolCallId) {
           try {
             const filePath = await exportToFormat(stagingEntry, format);
@@ -654,7 +655,7 @@ const plugin = definePlugin({
           }
         }
 
-        // --- PLA-56 GitHub commit pipeline ---
+        // --- GitHub commit pipeline ---
         const config = (await ctx.config.get()) as unknown as CadPluginConfig;
         if (!config.githubPatSecretId) {
           const ms = Date.now() - t0;
