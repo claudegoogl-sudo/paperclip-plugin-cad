@@ -57,6 +57,14 @@ const versionDefine = {
 // the host packages it bundles), and package.json ships dist/ verbatim, so
 // with `true` the published tarball carried our full source. The files
 // negation in package.json keeps the maps out of the package.
+// Source comments carry internal engineering context (tracker ids, design
+// notes) that has no business in a published artifact. esbuild's
+// `legalComments` only governs license/@preserve banners, so it does not
+// help here; `minifyWhitespace` drops every ordinary comment while leaving
+// identifier names intact. Names matter: the post-build gates in
+// `scripts/` (and the seccomp digest substitution below) re-parse the
+// emitted bundles, so full `minify` would buy nothing and risk breaking
+// them.
 const sharedOptions = {
   bundle: true,
   platform: "node",
@@ -65,6 +73,7 @@ const sharedOptions = {
   packages: "external",
   sourcemap: "external",
   define: versionDefine,
+  minifyWhitespace: true,
 };
 
 /**
