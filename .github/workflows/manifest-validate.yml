@@ -10,34 +10,26 @@ name: Plugin manifest validation (release gate)
 on:
   pull_request:
     paths:
-      - 'src/manifest.ts'
-      - 'src/globals.d.ts'
-      - 'src/manifest.version-parity.test.ts'
+      - 'src/**'
       - 'package.json'
       - 'package-lock.json'
       - 'esbuild.config.mjs'
       - 'scripts/validate-manifest.mjs'
       - 'scripts/check-manifest-version.mjs'
       - 'scripts/check-source-hygiene.mjs'
-      - 'src/validate-manifest.test.ts'
-      - 'src/no-published-sourcemaps.test.ts'
       - 'vitest.config.ts'
       - '.github/workflows/manifest-validate.yml'
   push:
     branches:
       - main
     paths:
-      - 'src/manifest.ts'
-      - 'src/globals.d.ts'
-      - 'src/manifest.version-parity.test.ts'
+      - 'src/**'
       - 'package.json'
       - 'package-lock.json'
       - 'esbuild.config.mjs'
       - 'scripts/validate-manifest.mjs'
       - 'scripts/check-manifest-version.mjs'
       - 'scripts/check-source-hygiene.mjs'
-      - 'src/validate-manifest.test.ts'
-      - 'src/no-published-sourcemaps.test.ts'
       - 'vitest.config.ts'
       - '.github/workflows/manifest-validate.yml'
 
