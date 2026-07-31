@@ -16,6 +16,22 @@ import { afterAll, describe, expect, it } from "vitest";
 const SOURCES_CONTENT_KEY = `"sourcesContent"`;
 const SOURCE_MAPPING_FOOTER = `sourceMappingURL=`;
 
+// Internal tracker ids and real vault namespaces reach the bundle through
+// ordinary source comments and manifest strings. The build strips comments
+// via esbuild `minifyWhitespace`; this asserts the result, scoped to the
+// bundled output under dist/ (this repo also packs `src/**`, by design —
+// it is a public repo and the source is already world-readable there, so
+// the gate does not cover it).
+//
+// Built from split literals for the same reason as the needles above, and
+// declared non-global so `.test()` cannot carry `lastIndex` state between
+// files and silently skip every other one.
+const TICKET_ID_RE = new RegExp("\\bPLA" + "-\\d{1,5}\\b");
+const VAULT_NS_PLACEHOLDERS = ["EXAMPLE", "OTHER", "\\.\\.\\."];
+const VAULT_NS_RE = new RegExp(
+  "vault" + `://(?!(?:${VAULT_NS_PLACEHOLDERS.join("|")})(?![\\w-]))[\\w-]+`,
+);
+
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = join(REPO_ROOT, "dist");
 const tempDirs: string[] = [];
@@ -33,6 +49,19 @@ function npmPack(args: string[]): string {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
+}
+
+// `npm pack` is the slow part of this suite, so pack once and share the
+// extracted tree across every assertion that needs to read packed files.
+let extracted: string | undefined;
+function packAndExtract(): string {
+  if (extracted) return extracted;
+  const dest = mkdtempSync(join(tmpdir(), "pack-"));
+  tempDirs.push(dest);
+  const tarball = npmPack(["--pack-destination", dest]).trim().split("\n").pop()!;
+  execFileSync("tar", ["-xzf", join(dest, tarball), "-C", dest]);
+  extracted = dest;
+  return dest;
 }
 
 afterAll(() => {
@@ -55,15 +84,31 @@ describe("published tarball", () => {
   });
 
   it("packs no file carrying inlined sources or a sourcemap footer", () => {
-    const dest = mkdtempSync(join(tmpdir(), "pack-"));
-    tempDirs.push(dest);
-    const tarball = npmPack(["--pack-destination", dest]).trim().split("\n").pop()!;
-    execFileSync("tar", ["-xzf", join(dest, tarball), "-C", dest]);
-
+    const dest = packAndExtract();
     const offenders = walk(join(dest, "package")).filter((file) => {
       const text = readFileSync(file, "utf8");
       return text.includes(SOURCES_CONTENT_KEY) || text.includes(SOURCE_MAPPING_FOOTER);
     });
+    expect(offenders.map((f) => f.slice(dest.length + 1))).toEqual([]);
+  });
+
+  it("packs no internal ticket ids or non-placeholder vault namespaces in the bundled dist/ output", () => {
+    const dest = packAndExtract();
+    // Scoped to the esbuild-bundled `.js` outputs under dist/ — the artifacts
+    // `minifyWhitespace` actually processes. `dist/cad_worker.py` is excluded
+    // on purpose: it is a byte-identical copy of `src/cad_worker.py`, which
+    // this repo's `files` array already ships raw (this is a public repo, so
+    // that source is already world-readable at the repo — see the
+    // sourcemap-scope rationale above). Scrubbing the dist/ copy while
+    // leaving the src/ original untouched would be cosmetic, not
+    // confidentiality, and risks a functional regression in a
+    // security-sandbox file for no disclosure benefit.
+    const offenders = walk(join(dest, "package"))
+      .filter((file) => file.includes("/dist/") && file.endsWith(".js"))
+      .filter((file) => {
+        const text = readFileSync(file, "utf8");
+        return TICKET_ID_RE.test(text) || VAULT_NS_RE.test(text);
+      });
     expect(offenders.map((f) => f.slice(dest.length + 1))).toEqual([]);
   });
 }, 180_000);
