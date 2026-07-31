@@ -1,5 +1,5 @@
 /**
- * CadQuery sandbox client — PLA-54, PLA-114.
+ * CadQuery sandbox client.
  *
  * Spawns src/cad_worker.py as an isolated subprocess for each script invocation.
  * One subprocess per request; no persistent worker pool; no shared filesystem
@@ -10,12 +10,12 @@
  * stdin/stdout pipe. Job JSON in, result JSON line out. No TCP listener,
  * no Unix socket file, no port allocation — AC2 satisfied trivially.
  *
- * ## Sandbox layering (PLA-106 §7 — binding)
+ * ## Sandbox layering (binding)
  *
  * Two independent layers, both kept on:
  *
  * 1. **bubblewrap + seccomp-bpf + cap-drop + uid/rlimits** — the security
- *    boundary (PLA-114).
+ *    boundary.
  *      - mount allowlist + netns + pidns + uts/ipc/cgroup ns
  *      - seccomp denylist of execve/fork/clone(non-pthread)/socket/mount/
  *        ptrace/bpf/io_uring/namespace ops/etc., with SCMP_ACT_KILL_PROCESS
@@ -23,10 +23,10 @@
  *      - rlimits (AS/NPROC/NOFILE/FSIZE/CPU/CORE)
  *
  * 2. **In-process Python hardening** — defense-in-depth and friendly errors
- *    for benign script bugs (commit 26ba919 / PLA-75). Stays in place
- *    underneath the kernel layer per PLA-106 §7 non-overlap rule.
+ *    for benign script bugs (commit 26ba919). Stays in place
+ *    underneath the kernel layer per the layering's non-overlap rule.
  *
- * ## Spawn-mode selection (PLA-106 §5.3)
+ * ## Spawn-mode selection
  *
  * Decided ONCE per worker-client construction (cached) by `selectSpawnMode`:
  *
@@ -88,7 +88,7 @@ import { randomUUID } from "node:crypto";
 const GRACE_SECONDS = 5;
 
 /**
- * Per-request timeout adder for bwrap setup overhead. PLA-106 §6.3.
+ * Per-request timeout adder for bwrap setup overhead.
  * 100 ms is well below the 5 s SIGKILL grace; bumpable to 200 ms if perf
  * measurements demand. Direct-spawn mode ignores this (no bwrap setup cost).
  */
@@ -117,7 +117,7 @@ const WORKER_PY = join(__dirname, "cad_worker.py");
 const SECCOMP_FILTER_PATH = join(__dirname, "..", "worker", "seccomp_filter.bpf");
 
 /**
- * Path to the python-side seccomp loader (PLA-114 / PLA-106 §1 rev 4).
+ * Path to the python-side seccomp loader.
  * The worker bootstrap installs the filter from inside the python process
  * after trusted import-time setup, because bubblewrap's `--seccomp <fd>`
  * mechanism applies the filter before the launcher's own execve into the
@@ -139,7 +139,7 @@ const SANDBOX_WORKER_PATH = `${SANDBOX_ROOT}/cad_worker.py`;
 const PREEXEC_PATH = join(__dirname, "..", "worker", "cad_preexec");
 
 // ---------------------------------------------------------------------------
-// Rlimit table (PLA-106 §3)
+// Rlimit table
 // ---------------------------------------------------------------------------
 
 interface RlimitTable {
@@ -194,14 +194,14 @@ export type WorkerResult =
        * Kernel-level discriminator, populated when the worker exited via a
        * signal rather than a normal status. Tests assert on this BEFORE the
        * JSON envelope so an in-process catch where a kernel kill was
-       * expected is itself a regression (PLA-106 §4).
+       * expected is itself a regression.
        */
       exitSignal?: NodeJS.Signals | null;
       exitCode?: number | null;
     };
 
 // ---------------------------------------------------------------------------
-// Spawn-mode selection (PLA-106 §5.3)
+// Spawn-mode selection
 // ---------------------------------------------------------------------------
 
 export type SpawnMode = "bwrap+seccomp" | "dev_direct";
@@ -325,7 +325,7 @@ export function selectSpawnMode(
     preexecPath: native ? undefined : PREEXEC_PATH,
   };
 
-  // PLA-215 / PLA-114 §5.2: hard-fail on sha256 mismatch between the build
+  // Hard-fail on sha256 mismatch between the build
   // manifest pin and the bytes on disk. Closes the substitution-attack
   // window where a tampered loader (e.g., one that omits the
   // prctl(PR_SET_SECCOMP) call) silently disables the kernel filter while
@@ -337,7 +337,7 @@ export function selectSpawnMode(
 }
 
 // ---------------------------------------------------------------------------
-// PLA-215 / PLA-114 §5.2 — runtime sha256 verification of the seccomp blob
+// Runtime sha256 verification of the seccomp blob
 // and python loader shim.
 // ---------------------------------------------------------------------------
 
@@ -357,7 +357,7 @@ const SHA256_HEX_LEN = 64;
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/i;
 
 /**
- * PLA-215 sidecar fallback. esbuild's post-bundle pass writes
+ * Sidecar fallback. esbuild's post-bundle pass writes
  * `dist/seccomp_filter.bpf.sha256` and `dist/seccomp_load.py.sha256`
  * alongside the substitution it does into the bundled JS sources.
  * Production builds load from `dist/cad-worker-client.js` and read the
@@ -449,7 +449,7 @@ export function verifySeccompPins(
   for (const c of checks) {
     if (c.pin.length !== SHA256_HEX_LEN) {
       throw new CadWorkerInternalError(
-        `[PLA-114 §5.2] ${c.name}: build manifest unsubstituted — ` +
+        `Seccomp pin check for ${c.name}: build manifest unsubstituted — ` +
           `pin length ${c.pin.length} ≠ ${SHA256_HEX_LEN} ` +
           `(placeholder __PLA114_SECCOMP_*_SHA256__ still present?). ` +
           `Run \`npm run build\` so esbuild substitutes the digests.`,
@@ -457,12 +457,12 @@ export function verifySeccompPins(
     }
     if (!SHA256_HEX_RE.test(c.pin)) {
       throw new CadWorkerInternalError(
-        `[PLA-114 §5.2] ${c.name}: build manifest pin is not a sha256 hex string: ${c.pin}`,
+        `Seccomp pin check for ${c.name}: build manifest pin is not a sha256 hex string: ${c.pin}`,
       );
     }
     if (!c.path) {
       throw new CadWorkerInternalError(
-        `[PLA-114 §5.2] ${c.name}: SpawnModeDecision is missing the path field — cannot verify pin.`,
+        `Seccomp pin check for ${c.name}: SpawnModeDecision is missing the path field — cannot verify pin.`,
       );
     }
 
@@ -471,14 +471,14 @@ export function verifySeccompPins(
       actual = createHash("sha256").update(readFileSync(c.path)).digest("hex");
     } catch (err) {
       throw new CadWorkerInternalError(
-        `[PLA-114 §5.2] ${c.name}: failed to read for sha256 verification ` +
+        `Seccomp pin check for ${c.name}: failed to read for sha256 verification ` +
           `(path=${c.path}): ${(err as Error).message}`,
       );
     }
 
     if (actual.toLowerCase() !== c.pin.toLowerCase()) {
       throw new CadWorkerInternalError(
-        `[PLA-114 §5.2] ${c.name}: sha256 mismatch — ` +
+        `Seccomp pin check for ${c.name}: sha256 mismatch — ` +
           `manifest pin=${c.pin} actual=${actual} path=${c.path}. ` +
           `Refusing to launch worker; the kernel sandbox layer would be ` +
           `silently inert under this state (substitution-attack defense).`,
@@ -500,7 +500,7 @@ export interface BuildSpawnOpts {
   workdir: string;
   /** Python interpreter path. Defaults to "python3". */
   pythonBin?: string;
-  /** rlimit table (PLA-106 §3). */
+  /** rlimit table. */
   rlimits: RlimitTable;
 }
 
@@ -518,17 +518,17 @@ export interface SpawnInvocation {
    * the seccomp filter blob is delivered to the worker via `--ro-bind`
    * inside the sandbox, not via FD inheritance. The python bootstrap reads
    * the blob from the read-only mount and installs it via prctl after
-   * trusted import-time setup completes (PLA-106 §1 rev 4).
+   * trusted import-time setup completes.
    */
   stdio: StdioOptions;
 }
 
 /**
- * Bootstrap one-expression executed by `python3 -c`. PLA-106 §1 rev 4:
+ * Bootstrap one-expression executed by `python3 -c`:
  * insert /sandbox into sys.path, install the seccomp filter via the loader
  * shim, then import the worker. `lock_down(...)` is lexically before
  * `import cad_worker` — the contract is that no untrusted code reaches the
- * import system before the filter is in force (§1.2 invariant).
+ * import system before the filter is in force.
  *
  * Kept on a single physical line so the argv survives any quoting layer
  * intact and so a reader can verify the lock-then-import ordering at a
@@ -543,7 +543,7 @@ const PYTHON_BOOTSTRAP =
 /**
  * Build the spawn invocation. Pure function — no I/O, no global side effects.
  *
- * Filter delivery (PLA-106 §1 rev 4):
+ * Filter delivery:
  *   - The seccomp BPF blob and the python loader shim are mounted read-only
  *     into the sandbox at /sandbox/seccomp_filter.bpf and /sandbox/seccomp_load.py.
  *   - The argv tail is `python3 -c "<bootstrap>"`. The bootstrap imports the
@@ -564,7 +564,7 @@ export function buildSpawnInvocation(opts: BuildSpawnOpts): SpawnInvocation {
   };
 
   if (opts.decision.mode === "dev_direct") {
-    // PLA-106 §5.3 dev path: in-process layer only, no bwrap, no seccomp.
+    // Dev path: in-process layer only, no bwrap, no seccomp.
     return {
       command: pythonBin,
       args: [WORKER_PY],
@@ -573,7 +573,7 @@ export function buildSpawnInvocation(opts: BuildSpawnOpts): SpawnInvocation {
     };
   }
 
-  // bwrap+seccomp path. Argv per PLA-106 §1 rev 4 (mount allowlist + ro-bind
+  // bwrap+seccomp path. Argv per the sandbox spec (mount allowlist + ro-bind
   // delivery of filter blob and loader shim) + §3 (rlimits).
   const bwrap = opts.decision.bwrapPath!;
   const venvPython = pythonBin;
@@ -695,7 +695,7 @@ export async function invokeWorker(
 ): Promise<WorkerResult> {
   const rlimits = defaultRlimits(timeoutSeconds);
 
-  // PLA-106 §1 rev 4: the seccomp filter blob is delivered to the worker
+  // The seccomp filter blob is delivered to the worker
   // via a `--ro-bind` mount inside the sandbox. The bootstrap reads it from
   // /sandbox/seccomp_filter.bpf and installs it via prctl after the trusted
   // imports complete. No parent-side FD plumbing.
@@ -724,7 +724,7 @@ export async function invokeWorker(
       resolve(result);
     };
 
-    // Hard deadline. PLA-106 §6.3: bwrap mode adds BWRAP_OVERHEAD_GRACE_MS.
+    // Hard deadline. bwrap mode adds BWRAP_OVERHEAD_GRACE_MS.
     const overheadMs = decision.mode === "bwrap+seccomp" ? BWRAP_OVERHEAD_GRACE_MS : 0;
     killTimer = setTimeout(() => {
       if (settled) return;
@@ -748,7 +748,7 @@ export async function invokeWorker(
       if (settled) return;
       if (killTimer !== null) clearTimeout(killTimer);
 
-      // PLA-106 §4: read the exit signal FIRST. SIGSYS = seccomp kill;
+      // Read the exit signal FIRST. SIGSYS = seccomp kill;
       // SIGKILL with a "seccomp" stderr line is the kernel-audit fallback.
       if (signal === "SIGSYS") {
         settle({
@@ -858,12 +858,12 @@ interface ArtifactEntry { script: string }
  * Create the real CadQuery worker client.
  *
  * Spawn-mode decision is resolved ONCE here and cached for the lifetime of
- * the returned client (PLA-106 §5.3). The `INFO sandbox.mode = …` line is
+ * the returned client. The `INFO sandbox.mode = …` line is
  * emitted on construction; never repeated per request.
  *
  * @param decisionOverride  Test seam: bypass `selectSpawnMode()` (which
  *   requires Linux + bwrap on PATH) and inject a fabricated decision.
- *   Production code never passes this. PLA-215 regression tests use it
+ *   Production code never passes this. Regression tests use it
  *   to verify that runtime sha256 verification fail-closes on tampered
  *   loader/filter paths and on unsubstituted-placeholder pins.
  */
@@ -875,7 +875,7 @@ export function createCadWorker(
   const decision = decisionOverride ?? selectSpawnMode();
   logSpawnModeOnce(decision, logger);
 
-  // PLA-215 / PLA-114 §5.2: if the caller injected a decision (test seam),
+  // If the caller injected a decision (test seam),
   // selectSpawnMode's verification was bypassed — re-run it here so the
   // override path is held to the same fail-closed bar as production. The
   // unsubstituted-placeholder regression test additionally injects a

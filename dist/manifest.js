@@ -1,5 +1,5 @@
 // src/manifest.ts
-var SECCOMP_FILTER_SHA256_PIN = "6bdbbc4fdfb3d80996c66a812df450c95043a86364fe8955651ec867859617ba";
+var SECCOMP_FILTER_SHA256_PIN = "__PLA114_SECCOMP_FILTER_SHA256__";
 var SECCOMP_LOADER_SHA256_PIN = "0fc1b58d38895fb2dc7be1464b1230344530aa7f168af9478fa47153e20f8be0";
 var manifest = {
   id: "platform.cad",
@@ -11,8 +11,8 @@ var manifest = {
   categories: ["connector"],
   // Capabilities (v0.1.0):
   //   agent.tools.register — register cad.run_script and cad.export
-  //   http.outbound        — GitHub Contents API push (PLA-56)
-  //   secrets.read-ref     — ctx.secrets.resolve for GitHub PAT (PLA-47)
+  //   http.outbound        — GitHub Contents API push
+  //   secrets.read-ref     — ctx.secrets.resolve for GitHub PAT
   //   metrics.write        — ctx.metrics counters + duration histograms
   capabilities: [
     "agent.tools.register",
@@ -23,12 +23,12 @@ var manifest = {
   entrypoints: {
     worker: "./dist/worker.js"
   },
-  // PLA-114 §5.2 — host-side kernel-sandbox capability negotiation.
+  // Host-side kernel-sandbox capability negotiation.
   runtimeRequirements: {
     kernelSandbox: "bubblewrap"
   },
-  // PLA-114 acceptance — pin the seccomp filter blob digest AND the
-  // python-side loader shim digest (rev-4 §5.2 dual pin). The build
+  // Pin the seccomp filter blob digest AND the
+  // python-side loader shim digest (dual pin). The build
   // script reads `worker/seccomp_filter.bpf.sha256` (produced by
   // `make -C worker`) and computes sha256 of `worker/seccomp_load.py`,
   // substituting both values at build time. Literals below are
@@ -39,13 +39,13 @@ var manifest = {
   // the filter blob unchanged.
   worker: {
     seccompFilterPath: "./worker/seccomp_filter.bpf",
-    seccompFilterSha256: "6bdbbc4fdfb3d80996c66a812df450c95043a86364fe8955651ec867859617ba",
+    seccompFilterSha256: "__PLA114_SECCOMP_FILTER_SHA256__",
     seccompLoaderPath: "./worker/seccomp_load.py",
     seccompLoaderSha256: "0fc1b58d38895fb2dc7be1464b1230344530aa7f168af9478fa47153e20f8be0"
   },
-  // instanceConfigSchema — ties secret-scope strictly to githubPatSecretId
-  // (PLA-41 remediation #2). Fields validated by the host before plugin load.
-  // PLA-74 F3: additionalProperties:false so unknown keys are rejected at host
+  // instanceConfigSchema — ties secret-scope strictly to githubPatSecretId.
+  // Fields validated by the host before plugin load.
+  // additionalProperties:false so unknown keys are rejected at host
   // load time rather than silently ignored (fail-closed).
   instanceConfigSchema: {
     type: "object",
@@ -57,7 +57,7 @@ var manifest = {
       },
       artifactRepoUrl: {
         type: "string",
-        description: "HTTPS clone URL of the GitHub repository where CAD artifacts are stored. Defaults to https://github.com/claudegoogl-sudo/cad-artifacts.git. Operator must pre-create this repo; the plugin is push-only (PLA-56 AC#2)."
+        description: "HTTPS clone URL of the GitHub repository where CAD artifacts are stored. Defaults to https://github.com/claudegoogl-sudo/cad-artifacts.git. Operator must pre-create this repo; the plugin is push-only."
       },
       artifactRepoBranch: {
         type: "string",
@@ -104,7 +104,7 @@ var manifest = {
           },
           format: {
             type: "string",
-            // PLA-443 — DR laser-fab ask: dxf/svg are 2D vector outputs.
+            // dxf/svg are 2D vector outputs.
             // DXF requires the script's `result` be a 2D Workplane (wires/faces);
             // SVG works for both 2D Workplanes and 3D shapes (projected view).
             enum: ["step", "stl", "3mf", "dxf", "svg"],
@@ -112,10 +112,10 @@ var manifest = {
           },
           paperclipTicketId: {
             type: "string",
-            // PLA-74 F1/F2 — allowlist regex; rejects path traversal and
+            // Allowlist regex; rejects path traversal and
             // commit-message injection at the host's schema-validation gate.
             pattern: "^[A-Z][A-Z0-9]{1,9}-[0-9]{1,9}$",
-            description: "Paperclip ticket ID (e.g. PLA-56). Used in artifact path and commit message."
+            description: "Paperclip ticket ID (e.g. ABC-123). Used in artifact path and commit message."
           },
           toolCallId: {
             type: "string",
@@ -129,7 +129,7 @@ var manifest = {
           }
         },
         required: ["artifactId", "format", "paperclipTicketId", "toolCallId"],
-        // PLA-74 F3 — fail-closed on unknown fields; matches cad.run_script.
+        // Fail-closed on unknown fields; matches cad.run_script.
         additionalProperties: false
       }
     }

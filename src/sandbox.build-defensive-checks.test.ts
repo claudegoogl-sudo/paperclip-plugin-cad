@@ -1,7 +1,7 @@
 /**
  * Seccomp build/load chain — silent-failure hardening regression tests.
  *
- * PLA-216 closes two "fail loudly when the filter isn't what you think it
+ * This closes two "fail loudly when the filter isn't what you think it
  * is" gaps in the seccomp build chain:
  *
  *   Obs 1 — `worker/Makefile` MIN_SOCK_FILTER_COUNT floor: a rule silently
@@ -98,7 +98,7 @@ function runMake(
 // ---------------------------------------------------------------------------
 
 describe.skipIf(!HAS_BUILD_DEPS)(
-  "PLA-216: seccomp build/load chain silent-failure hardening",
+  "seccomp build/load chain silent-failure hardening",
   () => {
     // -----------------------------------------------------------------------
     // Sanity gate. The canonical build must succeed and the resulting blob
@@ -189,7 +189,7 @@ describe.skipIf(!HAS_BUILD_DEPS)(
       const srcPath = join(dir, "seccomp_filter.c");
       const original = readFileSync(srcPath, "utf8");
       const FAKE = "_pla216_unresolvable_syscall_xyzzy_";
-      const inject = `    kill_syscall(ctx, "${FAKE}"); /* PLA-216 test injection */\n`;
+      const inject = `    kill_syscall(ctx, "${FAKE}"); /* test injection */\n`;
       // Insert just after the execve-family region so the failing call
       // sits in the canonical denylist body, exercising the same code path
       // every other kill_syscall does.
@@ -249,7 +249,7 @@ describe.skipIf(!HAS_BUILD_DEPS)(
       ).toBe(true);
       const patched = original.replace(
         before,
-        "seccomp_rule_add(ctx, SCMP_ACT_ERRNO(EPERM),\n                                  -1 /* PLA-216 test: forces -EINVAL */, 0)",
+        "seccomp_rule_add(ctx, SCMP_ACT_ERRNO(EPERM),\n                                  -1 /* test: forces -EINVAL */, 0)",
       );
       writeFileSync(srcPath, patched);
 

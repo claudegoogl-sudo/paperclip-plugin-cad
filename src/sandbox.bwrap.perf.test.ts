@@ -1,7 +1,7 @@
 /**
- * Bubblewrap + seccomp performance gates — PLA-114 / PLA-106 §6.2, §6.3.
+ * Bubblewrap + seccomp performance gates.
  *
- * Spec verbatim (§6.2):
+ * Spec verbatim:
  *
  *   "N=200 invocations of a trivial CadQuery script
  *    (`result = cq.Workplane('XY').box(1,1,1)`); the bwrap+seccomp mode's
@@ -177,7 +177,7 @@ async function loadBaseline(): Promise<BaselineFile | null> {
 
 const CAPTURE_BASELINE = process.env.CAD_WORKER_PERF_BASELINE === "1";
 
-describe.skipIf(!CAPTURE_BASELINE)("PLA-114 §6.2 — dev_direct baseline capture", () => {
+describe.skipIf(!CAPTURE_BASELINE)("dev_direct baseline capture", () => {
   it(`captures N=${N} dev_direct samples → ${BASELINE_PATH}`, async () => {
     const decision = selectSpawnMode();
     expect(decision.mode).toBe("dev_direct");
@@ -208,7 +208,7 @@ describe.skipIf(!CAPTURE_BASELINE)("PLA-114 §6.2 — dev_direct baseline captur
 // ---------------------------------------------------------------------------
 
 describe.skipIf(!HAS_BWRAP || CAPTURE_BASELINE)(
-  "PLA-114 §6.2/§6.3 — bwrap+seccomp performance gates",
+  "bwrap+seccomp performance gates",
   () => {
     let DECISION: SpawnModeDecision;
 

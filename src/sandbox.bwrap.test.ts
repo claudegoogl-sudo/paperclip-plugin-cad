@@ -1,13 +1,12 @@
 /**
- * Bubblewrap + seccomp integration matrix — PLA-114 / PLA-106 §4.
+ * Bubblewrap + seccomp integration matrix.
  *
  * Each test asserts at TWO layers, in this order:
  *
  *   1. Worker exit signal — `SIGSYS` (seccomp kill) or `SIGKILL` paired
  *      with a stderr line containing "seccomp". This is the kernel-level
  *      discriminator the spec requires. An in-process Python catch where
- *      a kernel kill was expected is itself a regression (§4 final
- *      paragraph).
+ *      a kernel kill was expected is itself a regression.
  *
  *   2. JSON envelope — only consulted when the worker exited normally
  *      (status 0 or 1) or with a non-SIGSYS / non-SIGKILL signal.
@@ -121,7 +120,7 @@ function isKernelKill(r: WorkerResult): boolean {
   if (r.ok) return false;
   if (r.exitSignal === "SIGSYS") return true;
   if (r.exitSignal === "SIGKILL" && /seccomp/i.test(r.message)) return true;
-  // bwrap-propagated signal-as-exit-code (PLA-114 rev-5 R8b triage).
+  // bwrap-propagated signal-as-exit-code (rev-5 R8b triage).
   if (r.exitCode === 128 + _SIGSYS_NUM) return true;
   if (r.exitCode === 128 + _SIGKILL_NUM && /seccomp/i.test(r.message)) return true;
   return r.error === "sandbox_violation";
@@ -137,12 +136,12 @@ function envelopeMatches(r: WorkerResult, regex: RegExp): boolean {
 // Suite
 // ---------------------------------------------------------------------------
 
-describe.skipIf(!HAS_BWRAP)("PLA-114 §4 — bwrap+seccomp integration matrix", () => {
+describe.skipIf(!HAS_BWRAP)("bwrap+seccomp integration matrix", () => {
   // -------------------------------------------------------------------------
-  // R-class: prove every PLA-75 R-family bypass now hits the kernel layer.
+  // R-class: prove every R-family bypass now hits the kernel layer.
   // -------------------------------------------------------------------------
 
-  describe("R-class — PLA-75 bypasses now killed at kernel", () => {
+  describe("R-class — bypasses now killed at kernel", () => {
     it("R1: socket.create_connection — SIGSYS or netns errno", async () => {
       const r = await run([
         "import socket",
@@ -232,8 +231,8 @@ describe.skipIf(!HAS_BWRAP)("PLA-114 §4 — bwrap+seccomp integration matrix", 
 
     it("R8a: sys.modules['__main__']._REAL_OS.system — SIGSYS on execve", async () => {
       // R8a was the canonical "kernel layer must catch this" test from
-      // PLA-75 when cad_worker ran AS `__main__`. PLA-106 rev-4 §5.2 (dual
-      // pin) refactored the bootstrap into a `python -c` shim that imports
+      // when cad_worker ran AS `__main__`. A later dual-pin bootstrap
+      // refactor introduced a `python -c` shim that imports
       // cad_worker as a regular module, so `sys.modules['__main__']` is now
       // the bootstrap shim — it has no `_REAL_OS` attribute. The gadget
       // dies at AttributeError before any syscall is attempted.
@@ -304,7 +303,7 @@ describe.skipIf(!HAS_BWRAP)("PLA-114 §4 — bwrap+seccomp integration matrix", 
   });
 
   // -------------------------------------------------------------------------
-  // NEW-class — additional coverage from PLA-106 §4.
+  // NEW-class — additional coverage.
   // -------------------------------------------------------------------------
 
   describe("NEW-class — kernel-layer additions", () => {
@@ -873,10 +872,10 @@ describe.skipIf(!HAS_BWRAP)("PLA-114 §4 — bwrap+seccomp integration matrix", 
   });
 
   // -------------------------------------------------------------------------
-  // PLA-73 AC1–AC8 reverification at the kernel layer.
+  // AC1–AC8 reverification at the kernel layer.
   // -------------------------------------------------------------------------
 
-  describe("PLA-73 ACs — reverified at kernel boundary", () => {
+  describe("ACs — reverified at kernel boundary", () => {
     it("AC2: no TCP listener (structural — argv has --unshare-all → fresh netns)", () => {
       // The spawn-mode decision and buildSpawnInvocation are pure; we
       // verify the bwrap argv pattern in unit tests in
