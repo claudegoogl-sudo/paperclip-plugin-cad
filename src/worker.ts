@@ -782,3 +782,4 @@ const plugin = definePlugin({
 
 export default plugin;
 runWorker(plugin, import.meta.url);
+
