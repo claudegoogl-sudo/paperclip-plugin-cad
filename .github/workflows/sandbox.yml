@@ -370,6 +370,16 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Run specs that need the real sandbox toolchain
+        # Both specs are no-ops on the manifest-validate.yml runner, which
+        # has neither cadquery nor a built seccomp_filter.bpf:
+        #   sandbox.test.ts          drives real CadQuery through the worker
+        #   sandbox.integrity.test.ts self-skips without the filter blob
+        # This job installs cadquery and builds the blob above, and it
+        # triggers on the same src/** paths, so gating them here means
+        # every spec in the repo blocks every pull request.
+        run: npx vitest run --config ./vitest.config.ts src/sandbox.test.ts src/sandbox.integrity.test.ts
+
       - name: Run bwrap integration matrix
         # Tee the vitest output to a file so the PR-comment-on-failure
         # step can surface it through the public unauthenticated comments

@@ -1,11 +1,14 @@
 name: Plugin manifest validation (release gate)
 
-# PLA-376 — release-time check that runs the host plugin-manifest validator
-# against the built `dist/manifest.js` BEFORE a tarball can be packed or
-# published. v0.1.1 shipped with `cad:run_script` tool names (post-PLA-163
-# regex rejects `:`) and the release passed CI before the operator's
-# install attempt revealed the manifest was unloadable. This gate makes
-# the same class of regression a build failure instead.
+# Release-time check that runs the host plugin-manifest validator against
+# the built `dist/manifest.js` BEFORE a tarball can be packed or
+# published. v0.1.1 shipped with `cad:run_script` tool names (the
+# tool-name regex rejects `:`) and the release passed CI before the
+# operator's install attempt revealed the manifest was unloadable. This
+# gate makes the same class of regression a build failure instead.
+#
+# Despite the workflow name, this job is also the repo's typecheck and
+# unit-test gate — see the job `name:` below.
 
 on:
   pull_request:
@@ -17,6 +20,7 @@ on:
       - 'scripts/validate-manifest.mjs'
       - 'scripts/check-manifest-version.mjs'
       - 'scripts/check-source-hygiene.mjs'
+      - 'tsconfig.json'
       - 'vitest.config.ts'
       - '.github/workflows/manifest-validate.yml'
   push:
@@ -30,12 +34,13 @@ on:
       - 'scripts/validate-manifest.mjs'
       - 'scripts/check-manifest-version.mjs'
       - 'scripts/check-source-hygiene.mjs'
+      - 'tsconfig.json'
       - 'vitest.config.ts'
       - '.github/workflows/manifest-validate.yml'
 
 jobs:
   validate-manifest:
-    name: validate dist/manifest.js against pluginManifestV1Schema
+    name: typecheck + unit tests + manifest validation
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -53,12 +58,33 @@ jobs:
       - name: Check source hygiene (no internal ticket ids / namespace strings)
         run: npm run check:source-hygiene
 
+      - name: Typecheck
+        run: npm run typecheck
+
       - name: Build manifest (and worker)
         run: npm run build
 
-      - name: Run regression test (PLA-376)
-        # Proves the gate catches the v0.1.1 incident shape before we
-        # ever invoke it on the actual built manifest.
+      - name: Unit tests (full suite)
+        # This runner deliberately stays cheap: plain npm, no cadquery and
+        # no compiled seccomp_filter.bpf. Three specs therefore cannot do
+        # real work here and are gated by sandbox.yml instead, which
+        # installs that toolchain and triggers on the same src/** paths:
+        #
+        #   sandbox.test.ts           excluded below — needs real CadQuery,
+        #                             would fail rather than skip
+        #   sandbox.bwrap*.test.ts    left in the glob; self-skip via
+        #                             describe.skipIf(!HAS_BWRAP)
+        #   sandbox.integrity.test.ts left in the glob; self-skips without
+        #                             the filter blob
+        #
+        # Between the two workflows every spec in the repo gates every PR.
+        run: npx vitest run --config ./vitest.config.ts --exclude 'src/sandbox.test.ts'
+
+      - name: Run manifest-validator regression test
+        # Also covered by "Unit tests" above; named separately so the
+        # packaging gate stays legible in the checks list and cannot be
+        # lost in a suite change. Proves the gate catches the v0.1.1
+        # incident shape before we invoke it on the actual built manifest.
         run: npx vitest run --config ./vitest.config.ts src/validate-manifest.test.ts
 
       - name: Validate built manifest
@@ -69,7 +95,7 @@ jobs:
         # fields — same code path that runs in `npm prepack`.
         run: npm run validate:manifest
 
-      - name: Check manifest.version == package.json.version (PLA-526)
+      - name: Check manifest.version == package.json.version
         # Re-parses the BUILT dist/manifest.js (not just the source) and
         # asserts manifest.version === package.json.version. Catches any
         # future regression in the esbuild `define` injection
@@ -80,8 +106,11 @@ jobs:
         run: npm run check:manifest-version
 
       - name: Assert the packed tarball ships no sourcemaps
-        # Sourcemaps inline the full original TypeScript of everything the
-        # bundle pulls in. Release tarballs are public assets, so shipping
-        # the maps publishes that source. Maps stay on disk for local
-        # debugging; this fails the build if one reaches the tarball.
+        # Also covered by "Unit tests" above; named separately so the
+        # packaging gate stays legible in the checks list if the suite
+        # changes shape. Sourcemaps inline the full original TypeScript of
+        # everything the bundle pulls in. Release tarballs are public
+        # assets, so shipping the maps publishes that source. Maps stay on
+        # disk for local debugging; this fails the build if one reaches
+        # the tarball.
         run: npx vitest run --config ./vitest.config.ts src/no-published-sourcemaps.test.ts
