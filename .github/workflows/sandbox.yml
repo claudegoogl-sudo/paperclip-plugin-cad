@@ -370,15 +370,20 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Run specs that need the real sandbox toolchain
-        # Both specs are no-ops on the manifest-validate.yml runner, which
-        # has neither cadquery nor a built seccomp_filter.bpf:
-        #   sandbox.test.ts          drives real CadQuery through the worker
-        #   sandbox.integrity.test.ts self-skips without the filter blob
-        # This job installs cadquery and builds the blob above, and it
-        # triggers on the same src/** paths, so gating them here means
-        # every spec in the repo blocks every pull request.
-        run: npx vitest run --config ./vitest.config.ts src/sandbox.test.ts src/sandbox.integrity.test.ts
+      - name: Unit tests (full suite, real CAD + seccomp toolchain)
+        # This job is the only place the whole suite can actually execute:
+        # it installs cadquery, bubblewrap and libseccomp and builds the
+        # filter blob above. On the plain runner in manifest-validate.yml
+        # the CadQuery-backed specs would fail and the blob-gated ones
+        # silently skip, so this step is what makes them gate a PR at all.
+        #
+        # The bwrap matrix and the perf gates are excluded here only
+        # because they get their own named steps below, which carry the
+        # diagnostic PR-comment hooks on failure.
+        run: |
+          npx vitest run --config ./vitest.config.ts \
+            --exclude 'src/sandbox.bwrap.test.ts' \
+            --exclude 'src/sandbox.bwrap.perf.test.ts'
 
       - name: Run bwrap integration matrix
         # Tee the vitest output to a file so the PR-comment-on-failure

@@ -808,7 +808,7 @@ describe("AC1+AC8 — cad.run_script end-to-end via worker.ts", () => {
       runWorker: vi.fn(),
     }));
 
-    type ToolHandler = (params: unknown) => Promise<unknown>;
+    type ToolHandler = (params: unknown, runCtx?: unknown) => Promise<unknown>;
     const handlers: Record<string, ToolHandler> = {};
     const metricsWrites: Array<{ name: string; value: number }> = [];
 
@@ -837,9 +837,14 @@ describe("AC1+AC8 — cad.run_script end-to-end via worker.ts", () => {
     const runScript = handlers["cad.run_script"];
     expect(runScript).toBeDefined();
 
-    const result = (await runScript({
-      script: "import cadquery as cq\nresult = cq.Workplane('XY').box(1, 1, 1)",
-    })) as { data?: { artifactId?: string; error?: string } };
+    // cad.run_script scopes its staging-map entry to the calling tenant and
+    // rejects a runCtx without companyId/agentId, so the second argument is
+    // required for the happy path. worker.cad-export.test.ts covers the
+    // rejection side of the same rule.
+    const result = (await runScript(
+      { script: "import cadquery as cq\nresult = cq.Workplane('XY').box(1, 1, 1)" },
+      { companyId: "company-A", agentId: "agent-A", runId: "run-A", projectId: "project-A" },
+    )) as { data?: { artifactId?: string; error?: string } };
 
     // AC1: succeeds and returns an artifactId.
     expect(result.data?.error).toBeUndefined();

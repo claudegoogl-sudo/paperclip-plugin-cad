@@ -64,21 +64,25 @@ jobs:
       - name: Build manifest (and worker)
         run: npm run build
 
-      - name: Unit tests (full suite)
+      - name: Unit tests (specs that need no CAD toolchain)
         # This runner deliberately stays cheap: plain npm, no cadquery and
-        # no compiled seccomp_filter.bpf. Three specs therefore cannot do
-        # real work here and are gated by sandbox.yml instead, which
-        # installs that toolchain and triggers on the same src/** paths:
+        # no compiled seccomp_filter.bpf. Installing cadquery here would
+        # duplicate sandbox.yml and add minutes to the fast gate.
         #
-        #   sandbox.test.ts           excluded below — needs real CadQuery,
-        #                             would fail rather than skip
-        #   sandbox.bwrap*.test.ts    left in the glob; self-skip via
-        #                             describe.skipIf(!HAS_BWRAP)
-        #   sandbox.integrity.test.ts left in the glob; self-skips without
-        #                             the filter blob
+        # The three specs excluded below drive real CadQuery through the
+        # worker subprocess, so they would fail rather than skip here. The
+        # bwrap and integrity specs stay in the glob and self-skip when the
+        # filter blob is absent.
         #
-        # Between the two workflows every spec in the repo gates every PR.
-        run: npx vitest run --config ./vitest.config.ts --exclude 'src/sandbox.test.ts'
+        # Everything excluded or skipped here runs for real in sandbox.yml,
+        # which installs cadquery + bubblewrap + libseccomp and triggers on
+        # the same src/** paths. Between the two workflows every spec in
+        # the repo gates every pull request.
+        run: |
+          npx vitest run --config ./vitest.config.ts \
+            --exclude 'src/sandbox.test.ts' \
+            --exclude 'src/worker.test.ts' \
+            --exclude 'src/worker.cad-export.test.ts'
 
       - name: Run manifest-validator regression test
         # Also covered by "Unit tests" above; named separately so the
