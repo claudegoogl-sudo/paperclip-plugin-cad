@@ -15,6 +15,7 @@
     "check:manifest-version": "node ./scripts/check-manifest-version.mjs",
     "check:release-tarball": "node ./scripts/check-release-tarball.mjs --keep",
     "check:release-tarball:self-test": "node ./scripts/check-release-tarball.mjs --self-test",
+    "check:drift": "node ./scripts/check-live-drift.mjs",
     "prepack": "make -C worker && npm run build && npm run validate:manifest"
   },
   "files": [
