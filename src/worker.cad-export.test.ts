@@ -1,5 +1,5 @@
 /**
- * Tests for cad.export: GitHub artifact persistence pipeline.
+ * Tests for 56: cad.export GitHub artifact persistence pipeline.
  *
  * Flow: cad.run_script → cad.export (commit to GitHub).
  *
@@ -28,7 +28,7 @@ vi.mock("@paperclipai/plugin-sdk", () => ({
 
 type ToolHandler = (params: unknown, runCtx?: unknown) => Promise<unknown>;
 
-// F6: default tenant identity used by every test that doesn't
+// 80 (F6): default tenant identity used by every test that doesn't
 // intentionally exercise cross-tenant isolation. Real `ToolRunContext` shape
 // (companyId, agentId, runId, projectId) — see plugin-sdk types.ts.
 const DEFAULT_RUN_CTX = {
@@ -117,7 +117,7 @@ const putOk = (sha = "abc123commit") => ({
 } as Response);
 
 const BASE_PARAMS = {
-  paperclipTicketId: "ACME-56",
+  paperclipTicketId: "TEST-56",
   toolCallId: "call-001",
   format: "step" as const,
 };
@@ -126,7 +126,7 @@ const BASE_PARAMS = {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe("cad.export pipeline", () => {
+describe("cad.export 56 pipeline", () => {
   it("AC1: prereq check — 404 → prerequisite_missing", async () => {
     const artifactId = await stageArtifact();
     const fetchMock = vi.mocked(globalThis.fetch);
@@ -164,7 +164,7 @@ describe("cad.export pipeline", () => {
     expect(result.data?.error).toBeUndefined();
     expect(result.data?.commitSha).toBe("commitsha456");
     expect(result.data?.permalink).toContain("commitsha456");
-    expect(result.data?.artifactPath).toBe("artifacts/ACME-56/call-001/artifact.step");
+    expect(result.data?.artifactPath).toBe("artifacts/company-A/TEST-56/call-001/artifact.step");
 
     const putCalls = fetchMock.mock.calls.filter((c) => (c[1] as RequestInit | undefined)?.method === "PUT");
     expect(putCalls).toHaveLength(0);
@@ -186,8 +186,8 @@ describe("cad.export pipeline", () => {
     expect(result.data?.error).toBeUndefined();
     expect(result.data?.commitSha).toBe("deadbeef1234");
     expect(result.data?.permalink).toContain("deadbeef1234");
-    expect(result.data?.permalink).toContain("artifacts/ACME-56/call-001/artifact.step");
-    expect(result.data?.artifactPath).toBe("artifacts/ACME-56/call-001/artifact.step");
+    expect(result.data?.permalink).toContain("artifacts/company-A/TEST-56/call-001/artifact.step");
+    expect(result.data?.artifactPath).toBe("artifacts/company-A/TEST-56/call-001/artifact.step");
   });
 
   it("AC3: PAT not present in returned data", async () => {
@@ -212,11 +212,11 @@ describe("cad.export pipeline", () => {
     fetchMock.mockResolvedValueOnce(notFound());
     fetchMock.mockResolvedValueOnce(putOk("sha-msg-test"));
 
-    await exportArtifact({ artifactId, format: "step", paperclipTicketId: "ACME-999", toolCallId: "tc-abc123" });
+    await exportArtifact({ artifactId, format: "step", paperclipTicketId: "TEST-999", toolCallId: "tc-abc123" });
 
     const putCall = fetchMock.mock.calls.find((c) => (c[1] as RequestInit | undefined)?.method === "PUT");
     const body = JSON.parse((putCall![1] as RequestInit).body as string) as { message?: string };
-    expect(body.message).toBe("CAD artifact: ticket=ACME-999 tool=cad.export call=tc-abc123");
+    expect(body.message).toBe("CAD artifact: ticket=TEST-999 tool=cad.export call=tc-abc123");
     expect(body.message).not.toContain("ghp_");
   });
 
@@ -322,7 +322,7 @@ describe("cad.export pipeline", () => {
     vi.resetModules();
   });
 
-  it("deterministic path: artifacts/{ticketId}/{callId}/{filename}", { timeout: 15000 }, async () => {
+  it("deterministic path: artifacts/{companyId}/{ticketId}/{callId}/{filename}", { timeout: 15000 }, async () => {
     const artifactId = await stageArtifact();
     const fetchMock = vi.mocked(globalThis.fetch);
     fetchMock.mockReset();
@@ -333,16 +333,16 @@ describe("cad.export pipeline", () => {
 
     const result = (await exportArtifact({
       artifactId, format: "stl" as const,
-      paperclipTicketId: "ACME-42", toolCallId: "tc-xyz", filename: "part.stl",
+      paperclipTicketId: "TEST-42", toolCallId: "tc-xyz", filename: "part.stl",
     })) as { data?: { artifactPath?: string } };
-    expect(result.data?.artifactPath).toBe("artifacts/ACME-42/tc-xyz/part.stl");
+    expect(result.data?.artifactPath).toBe("artifacts/company-A/TEST-42/tc-xyz/part.stl");
 
     const putCall = fetchMock.mock.calls.find((c) => (c[1] as RequestInit | undefined)?.method === "PUT");
-    expect(typeof putCall![0] === "string" ? putCall![0] : "").toContain("artifacts/ACME-42/tc-xyz/part.stl");
+    expect(typeof putCall![0] === "string" ? putCall![0] : "").toContain("artifacts/company-A/TEST-42/tc-xyz/part.stl");
   });
 
   // -------------------------------------------------------------------------
-  // F6: tenant-scoped staging map regression tests.
+  // 80 (F6): tenant-scoped staging map regression tests.
   //
   // The CAD plugin worker process is shared across all agents and companies on
   // a host. The staging map must be keyed by (companyId, agentId, artifactId)
@@ -427,14 +427,14 @@ describe("cad.export pipeline", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Security review — F1/F2 regression tests
+// 74 SecurityEngineer review — F1/F2 regression tests
 //
 // Covers the "Required tests" list from the F1 finding:
 //   1. Reject paperclipTicketId="../.."
 //   2. Reject toolCallId="../foo"
 //   3. Reject filename=".github/workflows/x.yml"
 //   4. Reject filename="../../escape"
-//   5. Reject paperclipTicketId="ABC-1\nCloses #1" (commit-message injection)
+//   5. Reject paperclipTicketId="TEST-1\nCloses #1" (commit-message injection)
 //   6. Reject paperclipTicketId="x; rm -rf"
 //   7. Path normalization: surviving inputs build a path starting with "artifacts/"
 //   8. Constructed Contents API URL contains exactly the expected path
@@ -442,7 +442,7 @@ describe("cad.export pipeline", () => {
 // All cases must return validation_error and MUST NOT call fetch.
 // ---------------------------------------------------------------------------
 
-describe("cad.export F1/F2 — input allowlist (path-traversal + commit-injection)", () => {
+describe("cad.export 74 F1/F2 — input allowlist (path-traversal + commit-injection)", () => {
   // Each test stages a real artifact then submits an adversarial input. The
   // expected outcome is a fail-closed validation_error with no outbound fetch.
   it("F1.1: rejects paperclipTicketId='../..' with validation_error", { timeout: 15000 }, async () => {
@@ -467,7 +467,7 @@ describe("cad.export F1/F2 — input allowlist (path-traversal + commit-injectio
 
     const result = (await exportArtifact({
       artifactId, format: "step" as const,
-      paperclipTicketId: "ACME-56", toolCallId: "../foo",
+      paperclipTicketId: "TEST-56", toolCallId: "../foo",
     })) as { error?: string; data?: { code?: string; message?: string } };
     expect(result.error).toBe("validation_error");
     expect(result.data?.message).toMatch(/toolCallId/);
@@ -481,7 +481,7 @@ describe("cad.export F1/F2 — input allowlist (path-traversal + commit-injectio
 
     const result = (await exportArtifact({
       artifactId, format: "step" as const,
-      paperclipTicketId: "ACME-56", toolCallId: "call-x",
+      paperclipTicketId: "TEST-56", toolCallId: "call-x",
       filename: ".github/workflows/x.yml",
     })) as { error?: string; data?: { code?: string; message?: string } };
     expect(result.error).toBe("validation_error");
@@ -496,7 +496,7 @@ describe("cad.export F1/F2 — input allowlist (path-traversal + commit-injectio
 
     const result = (await exportArtifact({
       artifactId, format: "step" as const,
-      paperclipTicketId: "ACME-56", toolCallId: "call-x",
+      paperclipTicketId: "TEST-56", toolCallId: "call-x",
       filename: "../../escape",
     })) as { error?: string; data?: { code?: string; message?: string } };
     expect(result.error).toBe("validation_error");
@@ -511,7 +511,7 @@ describe("cad.export F1/F2 — input allowlist (path-traversal + commit-injectio
 
     const result = (await exportArtifact({
       artifactId, format: "step" as const,
-      paperclipTicketId: "ABC-1\nCloses #1", toolCallId: "call-x",
+      paperclipTicketId: "TEST-1\nCloses #1", toolCallId: "call-x",
     })) as { error?: string; data?: { code?: string; message?: string } };
     expect(result.error).toBe("validation_error");
     expect(result.data?.message).toMatch(/paperclipTicketId/);
@@ -543,10 +543,10 @@ describe("cad.export F1/F2 — input allowlist (path-traversal + commit-injectio
 
     const result = (await exportArtifact({
       artifactId, format: "stl" as const,
-      paperclipTicketId: "ACME-56", toolCallId: "call_x-1",
+      paperclipTicketId: "TEST-56", toolCallId: "call_x-1",
       filename: "model.stl",
     })) as { data?: { artifactPath?: string } };
-    expect(result.data?.artifactPath).toBe("artifacts/ACME-56/call_x-1/model.stl");
+    expect(result.data?.artifactPath).toBe("artifacts/company-A/TEST-56/call_x-1/model.stl");
     expect(result.data?.artifactPath?.startsWith("artifacts/")).toBe(true);
   });
 
@@ -561,7 +561,7 @@ describe("cad.export F1/F2 — input allowlist (path-traversal + commit-injectio
 
     await exportArtifact({
       artifactId, format: "step" as const,
-      paperclipTicketId: "ACME-56", toolCallId: "abc",
+      paperclipTicketId: "TEST-56", toolCallId: "abc",
       filename: "part.step",
     });
 
@@ -577,21 +577,21 @@ describe("cad.export F1/F2 — input allowlist (path-traversal + commit-injectio
     const putCall = fetchMock.mock.calls.find((c) => (c[1] as RequestInit | undefined)?.method === "PUT");
     expect(putCall).toBeDefined();
     const putUrl = typeof putCall![0] === "string" ? putCall![0] : (putCall![0] as Request).url;
-    expect(putUrl).toContain("/contents/artifacts/ACME-56/abc/part.step");
+    expect(putUrl).toContain("/contents/artifacts/company-A/TEST-56/abc/part.step");
   });
 });
 
 // ---------------------------------------------------------------------------
-// dxf / svg 2D vector formats
+// 443 — dxf / svg 2D vector formats
 //
-// Cross-company ask via DR. Verifies:
+// Cross-company ask via DR (DPR-34). Verifies:
 //   - Enum accepts "dxf" and "svg" (no validation_error from worker.ts:543).
 //   - Worker routes through the same GitHub-commit pipeline as 3D formats.
 //   - Default filename uses the new extension (artifact.dxf / artifact.svg).
 //   - artifactPath is artifacts/{ticket}/{call}/artifact.<format>.
 // ---------------------------------------------------------------------------
 
-describe("cad.export — dxf / svg 2D vector formats", () => {
+describe("cad.export 443 — dxf / svg 2D vector formats", () => {
   it("accepts format='dxf' and commits artifact.dxf via the same pipeline", async () => {
     const artifactId = await stageArtifact();
     const fetchMock = vi.mocked(globalThis.fetch);
@@ -608,11 +608,11 @@ describe("cad.export — dxf / svg 2D vector formats", () => {
     })) as { data?: { artifactPath?: string; commitSha?: string; error?: string } };
     expect(result.data?.error).toBeUndefined();
     expect(result.data?.commitSha).toBe("dxfsha");
-    expect(result.data?.artifactPath).toBe("artifacts/ACME-56/call-001/artifact.dxf");
+    expect(result.data?.artifactPath).toBe("artifacts/company-A/TEST-56/call-001/artifact.dxf");
 
     const putCall = fetchMock.mock.calls.find((c) => (c[1] as RequestInit | undefined)?.method === "PUT");
     const putUrl = typeof putCall![0] === "string" ? putCall![0] : (putCall![0] as Request).url;
-    expect(putUrl).toContain("/contents/artifacts/ACME-56/call-001/artifact.dxf");
+    expect(putUrl).toContain("/contents/artifacts/company-A/TEST-56/call-001/artifact.dxf");
   });
 
   it("accepts format='svg' and commits artifact.svg via the same pipeline", async () => {
@@ -631,7 +631,7 @@ describe("cad.export — dxf / svg 2D vector formats", () => {
     })) as { data?: { artifactPath?: string; commitSha?: string; error?: string } };
     expect(result.data?.error).toBeUndefined();
     expect(result.data?.commitSha).toBe("svgsha");
-    expect(result.data?.artifactPath).toBe("artifacts/ACME-56/call-001/artifact.svg");
+    expect(result.data?.artifactPath).toBe("artifacts/company-A/TEST-56/call-001/artifact.svg");
   });
 
   it("rejects an unknown 2D-ish format ('eps') with validation_error", async () => {
@@ -654,10 +654,10 @@ describe("cad.export — dxf / svg 2D vector formats", () => {
 });
 
 // ---------------------------------------------------------------------------
-// F4 — strict URL parsing for parseGitHubUrl
+// 74 F4 — strict URL parsing for parseGitHubUrl
 // ---------------------------------------------------------------------------
 
-describe("cad.export F4 — strict URL parsing", () => {
+describe("cad.export 74 F4 — strict URL parsing", () => {
   it("F4: rejects http:// (non-https) artifactRepoUrl with prerequisite_missing", { timeout: 15000 }, async () => {
     vi.resetModules();
     const { ctx: customCtx, handlers } = buildMockCtx("ghp_x", {
@@ -673,7 +673,7 @@ describe("cad.export F4 — strict URL parsing", () => {
 
     const result = (await handlers["cad.export"]({
       artifactId, format: "step" as const,
-      paperclipTicketId: "ACME-56", toolCallId: "call-1",
+      paperclipTicketId: "TEST-56", toolCallId: "call-1",
     }, DEFAULT_RUN_CTX)) as { data?: { error?: string; message?: string } };
     expect(result.data?.error).toBe("prerequisite_missing");
     expect(result.data?.message).toMatch(/https:\/\/github\.com/);
@@ -696,7 +696,7 @@ describe("cad.export F4 — strict URL parsing", () => {
 
     const result = (await handlers["cad.export"]({
       artifactId, format: "step" as const,
-      paperclipTicketId: "ACME-56", toolCallId: "call-1",
+      paperclipTicketId: "TEST-56", toolCallId: "call-1",
     }, DEFAULT_RUN_CTX)) as { data?: { error?: string } };
     expect(result.data?.error).toBe("prerequisite_missing");
 

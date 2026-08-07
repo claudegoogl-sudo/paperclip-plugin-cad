@@ -1,5 +1,5 @@
 /**
- * CadQuery worker sandbox tests.
+ * CadQuery worker sandbox tests — 54.
  *
  * Acceptance criteria covered:
  *
@@ -187,7 +187,7 @@ describe("AC6 — network restriction", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error).toBe("script_error");
-      // The stub raises "network access blocked"; _restricted_import
+      // 54: stub raises "network access blocked"; 76: _restricted_import
       // raises "import blocked" — both indicate the sandbox is working.
       expect(result.message).toMatch(/network access blocked|import blocked|\[cad-worker\]/i);
     }
@@ -208,7 +208,7 @@ describe("AC6 — network restriction", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error).toBe("script_error");
-      // The stub raises "network access blocked"; _restricted_import
+      // 54: stub raises "network access blocked"; 76: _restricted_import
       // raises "import blocked" — both indicate the sandbox is working.
       expect(result.message).toMatch(/network access blocked|import blocked|\[cad-worker\]/i);
     }
@@ -284,18 +284,18 @@ describe("renderCadQuery — end-to-end integration", () => {
     }
   }, T);
 
-  it("MAX_TIMEOUT_SECONDS ≤ 300s", () => {
+  it("MAX_TIMEOUT_SECONDS ≤ 300s as required by 54", () => {
     expect(MAX_TIMEOUT_SECONDS).toBeLessThanOrEqual(300);
     expect(DEFAULT_TIMEOUT_SECONDS).toBeLessThanOrEqual(MAX_TIMEOUT_SECONDS);
   });
 });
 
 // ---------------------------------------------------------------------------
-// Sandbox hardening regression tests
-// Each test must fail against the pre-hardening-fix worker and pass after the fix.
+// 76 — sandbox hardening regression tests
+// Each test must fail against the pre-76 worker and pass after the fix.
 // ---------------------------------------------------------------------------
 
-describe("sandbox hardening", () => {
+describe("TEST-76 — sandbox hardening", () => {
   it("subprocess.run(['id']) → script_error (CRITICAL-1: subprocess blocked)", async () => {
     const workdir = await freshWorkdir();
     const script =
@@ -393,13 +393,13 @@ describe("sandbox hardening", () => {
   }, T);
 
   // -------------------------------------------------------------------------
-  // R1 — os.system / os.exec* / os.fork RCE blocked via os proxy.
+  // 75 R1 — os.system / os.exec* / os.fork RCE blocked via os proxy.
   // Regression test: must FAIL against commit 1465f69 (os not restricted —
   // os.system runs the shell, then the script falls through to the
   // "did not assign result" branch which produces script_error WITHOUT the
-  // PermissionError text).  Must PASS after R1 fix.
+  // PermissionError text).  Must PASS after 75 R1 fix.
   // -------------------------------------------------------------------------
-  it("os.system('true') → script_error with PermissionError (R1: os shell escape blocked)", async () => {
+  it("os.system('true') → script_error with PermissionError (75 R1: os shell escape blocked)", async () => {
     const workdir = await freshWorkdir();
     const script =
       "import os\n" +
@@ -423,7 +423,7 @@ describe("sandbox hardening", () => {
     }
   }, T);
 
-  it("os.fork() → script_error with PermissionError (R1: os.fork blocked)", async () => {
+  it("os.fork() → script_error with PermissionError (75 R1: os.fork blocked)", async () => {
     const workdir = await freshWorkdir();
     const script =
       "import os\n" +
@@ -443,7 +443,7 @@ describe("sandbox hardening", () => {
     }
   }, T);
 
-  it("os.path.* and os.getcwd still work for legitimate CadQuery scripts (R1: proxy delegation)", async () => {
+  it("os.path.* and os.getcwd still work for legitimate CadQuery scripts (75 R1: proxy delegation)", async () => {
     // The proxy must transparently delegate safe attributes — verifies the
     // R1 fix did not over-block CadQuery's required os surface.
     const workdir = await freshWorkdir();
@@ -465,14 +465,14 @@ describe("sandbox hardening", () => {
   }, T);
 
   // -------------------------------------------------------------------------
-  // R2 — sys.modules['ctypes'] direct dict-read bypass blocked.
+  // 75 R2 — sys.modules['ctypes'] direct dict-read bypass blocked.
   // Regression test: must FAIL against commit 1465f69 (CadQuery is imported
   // AFTER user-script exec in 1465f69, so sys.modules['ctypes'] only has the
   // real ctypes if user code triggered the load via `import cadquery` —
   // which this test does — at which point libc.system runs the shell and
-  // the export succeeds with ok:true).  Must PASS after R2 fix.
+  // the export succeeds with ok:true).  Must PASS after 75 R2 fix.
   // -------------------------------------------------------------------------
-  it("sys.modules['ctypes'] direct read → script_error (R2: ctypes bypass blocked)", async () => {
+  it("sys.modules['ctypes'] direct read → script_error (75 R2: ctypes bypass blocked)", async () => {
     const workdir = await freshWorkdir();
     // The user script imports cadquery, which on 1465f69 triggers a
     // transitive ctypes load and populates sys.modules['ctypes'] with the
@@ -502,7 +502,7 @@ describe("sandbox hardening", () => {
     }
   }, T);
 
-  it("import ctypes via real __import__ post-init → ImportError (R2: meta-path locked)", async () => {
+  it("import ctypes via real __import__ post-init → ImportError (75 R2: meta-path locked)", async () => {
     // After R2 hardening, ctypes is also in _META_PATH_BLOCKED, so even if a
     // user reaches the real __import__ (e.g. via `__builtins__` membership
     // tricks not blocked by RR2) the meta-path finder catches the import.
@@ -529,7 +529,7 @@ describe("sandbox hardening", () => {
   }, T);
 
   // -------------------------------------------------------------------------
-  // R3 — sys.modules['os'].system(...) bypass blocked.
+  // 75 R3 — sys.modules['os'].system(...) bypass blocked.
   // Fix: _harden_post_init_imports replaces sys.modules['os'] with the
   // _RestrictedOs proxy so dict-read of sys.modules['os'] also returns the
   // proxy, not the real os module.
@@ -538,7 +538,7 @@ describe("sandbox hardening", () => {
   // os.system runs the shell → script falls through to "did not assign"
   // script_error without PermissionError text).  Must PASS after R3 fix.
   // -------------------------------------------------------------------------
-  it("sys.modules['os'].system → script_error with PermissionError (R3: real os via sys.modules blocked)", async () => {
+  it("sys.modules['os'].system → script_error with PermissionError (75 R3: real os via sys.modules blocked)", async () => {
     const workdir = await freshWorkdir();
     const script =
       "import sys\n" +
@@ -563,7 +563,7 @@ describe("sandbox hardening", () => {
   }, T);
 
   // -------------------------------------------------------------------------
-  // R4 — Linux's `posix` C-level OS module bypass blocked.
+  // 75 R4 — Linux's `posix` C-level OS module bypass blocked.
   // Fix: posix / nt / _posixsubprocess / pty added to _BLOCKED_MODULES_SET
   // (rejected by _restricted_import), popped from sys.modules, and added to
   // _META_PATH_BLOCKED in _harden_post_init_imports.
@@ -572,7 +572,7 @@ describe("sandbox hardening", () => {
   // can `import posix; posix.system(...)` for direct shell access).
   // Must PASS after R4 fix.
   // -------------------------------------------------------------------------
-  it("import posix → script_error with ImportError (R4: posix C-level OS module blocked)", async () => {
+  it("import posix → script_error with ImportError (75 R4: posix C-level OS module blocked)", async () => {
     const workdir = await freshWorkdir();
     const script =
       "import posix\n" +
@@ -596,7 +596,7 @@ describe("sandbox hardening", () => {
     }
   }, T);
 
-  it("sys.modules['posix'] direct read → script_error with KeyError (R4: posix dict-read bypass blocked)", async () => {
+  it("sys.modules['posix'] direct read → script_error with KeyError (75 R4: posix dict-read bypass blocked)", async () => {
     const workdir = await freshWorkdir();
     const script =
       "import sys\n" +
@@ -621,7 +621,7 @@ describe("sandbox hardening", () => {
   }, T);
 
   // -------------------------------------------------------------------------
-  // R5 — os._real_os attribute leak blocked.
+  // 75 R5 — os._real_os attribute leak blocked.
   // Fix: _RestrictedOs no longer stores the real os reference on its
   // instance __dict__ (was: `object.__setattr__(self, "_real_os", os)`).
   // The class now uses module-level _REAL_OS via __getattr__, so attribute
@@ -633,7 +633,7 @@ describe("sandbox hardening", () => {
   // module; the test's script raises SystemError("R5_LEAK_REACHED") with
   // the leaked module repr).  Must PASS after R5 fix.
   // -------------------------------------------------------------------------
-  it("os._real_os attribute → AttributeError (R5: proxy __dict__ leak closed)", async () => {
+  it("os._real_os attribute → AttributeError (75 R5: proxy __dict__ leak closed)", async () => {
     const workdir = await freshWorkdir();
     // Discriminator: when _real_os is leaked, the script raises
     // SystemError with a marker the test can detect.  When the leak is
@@ -666,14 +666,14 @@ describe("sandbox hardening", () => {
   }, T);
 
   // -------------------------------------------------------------------------
-  // R6 — vars(os) / os.__dict__ leak of _real_os blocked.
+  // 75 R6 — vars(os) / os.__dict__ leak of _real_os blocked.
   // Same root as R5: removing _real_os from the proxy's instance __dict__
   // also closes vars()/__dict__ inspection.
   //
   // Regression: must FAIL at eb1b9ad (vars(os).get('_real_os') is the real
   // os module).  Must PASS after R5/R6 refactor.
   // -------------------------------------------------------------------------
-  it("vars(os)['_real_os'] → not present (R6: vars/__dict__ leak closed)", async () => {
+  it("vars(os)['_real_os'] → not present (75 R6: vars/__dict__ leak closed)", async () => {
     const workdir = await freshWorkdir();
     const script = [
       "import os",
@@ -699,7 +699,7 @@ describe("sandbox hardening", () => {
   }, T);
 
   // -------------------------------------------------------------------------
-  // R7 — cross-module __builtins__ leak of real __import__ blocked.
+  // 75 R7 — cross-module __builtins__ leak of real __import__ blocked.
   // Fix: _harden_builtins replaces _builtins.__import__ with
   // _restricted_import, so any code path that reaches the real builtins
   // module (via sys.modules['<any module>'].__builtins__) sees the
@@ -711,7 +711,7 @@ describe("sandbox hardening", () => {
   // the shell; falls through to "did not assign" with no PermissionError
   // text).  Must PASS after R7 fix.
   // -------------------------------------------------------------------------
-  it("sys.modules['cadquery'].__builtins__['__import__'] → restricted (R7: cross-module builtins leak closed)", async () => {
+  it("sys.modules['cadquery'].__builtins__['__import__'] → restricted (75 R7: cross-module builtins leak closed)", async () => {
     const workdir = await freshWorkdir();
     // Note: a non-__main__ module's `__builtins__` may be either the
     // builtins module or its __dict__ depending on how it was loaded.
@@ -743,7 +743,7 @@ describe("sandbox hardening", () => {
     }
   }, T);
 
-  it("eval with empty globals → restricted __import__ (R7: eval auto-injection closed)", async () => {
+  it("eval with empty globals → restricted __import__ (75 R7: eval auto-injection closed)", async () => {
     const workdir = await freshWorkdir();
     // Python auto-injects the real builtins module when globals lacks
     // '__builtins__'.  After R7, real builtins.__import__ is restricted,

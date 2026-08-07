@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-CadQuery worker subprocess.
+CadQuery worker subprocess — 54.
 
 Reads ONE JSON job from stdin, executes the CadQuery script in an isolated
 environment, writes ONE JSON result to stdout, then exits.
 
-Process model choice:
+Process model choice (54 design):
   stdin/stdout pipe (variant of option (a): named pipe / length-prefixed protocol).
   - Job delivered as a single JSON document on stdin; result on stdout.
   - No TCP listener; no Unix socket file; satisfies AC2 trivially.
@@ -46,7 +46,7 @@ Network restriction (AC6 — library-restriction-based approach):
       - Sufficient for the stated threat model (agent-authored scripts that
         should not make network calls, not a hostile adversary bypassing the
         Python interpreter).
-      - Acceptable per the stated design scope ("call the choice in the design comment").
+      - Acceptable per 54 scope ("call the choice in the design comment").
 
 Dependency pinning (AC5):
     CadQuery and its transitive dependencies are pinned via
@@ -75,7 +75,7 @@ from typing import Any
 # path that can reach `sys.modules['__main__']._REAL_IMPORT` /
 # `sys.modules['__main__']._REAL_OS` would defeat the proxy.  Closing the
 # in-process Python escape surface for that gadget requires OS-level isolation
-# (Option B); see the strategic note on OS-level isolation (2026-05-01). This is a documented
+# (Option B); see 73 strategic note (2026-05-01).  This is a documented
 # residual risk in the Option A threat model.
 _REAL_IMPORT = _builtins.__import__
 _REAL_OS = os
@@ -91,7 +91,7 @@ _REAL_COMPILE = _builtins.compile
 _REAL_EXEC = _builtins.exec
 
 # ---------------------------------------------------------------------------
-# Network restriction — library-restriction-based (AC6)
+# Network restriction — library-restriction-based (54 AC6)
 # ---------------------------------------------------------------------------
 
 _BLOCKED_MODULES: list[str] = [
@@ -133,7 +133,7 @@ _BLOCKED_MODULES: list[str] = [
     "httpx",           # third-party async HTTP client
     "aiohttp",         # third-party async HTTP client
 
-    # ---- Process / OS escape vectors (CRITICAL-1, CRITICAL-2, HIGH-1) ----
+    # ---- Process / OS escape vectors (76 CRITICAL-1, CRITICAL-2, HIGH-1) ----
     "subprocess",           # CRITICAL-1: arbitrary command execution
     "ctypes",               # CRITICAL-2: native library / raw syscall access
     "ctypes.util",          # CRITICAL-2: ctypes helper
@@ -143,7 +143,7 @@ _BLOCKED_MODULES: list[str] = [
     "multiprocessing",      # process spawning (belt-and-suspenders with subprocess)
     "threading",            # long-running thread escape from sandbox lifetime
 
-    # ---- Platform OS modules (R4) ----
+    # ---- Platform OS modules (75 R4) ----
     # The C-level OS modules backing `os`.  `os` re-exports `system`, `popen`,
     # `exec*`, `fork`, etc. from these modules.  Once `os` is loaded the
     # bindings inside the `os` module's namespace are sufficient — no other
@@ -187,7 +187,7 @@ _BLOCKED_MODULES_SET: frozenset[str] = frozenset(_BLOCKED_MODULES)
 # already loaded at Python startup and the `os` module re-exports the bindings
 # it needs from them; CadQuery / OpenCASCADE may also lazily reach posix
 # during their own init.  _harden_post_init_imports() pops + meta-path-blocks
-# them after CadQuery is fully imported (R4).
+# them after CadQuery is fully imported (75 R4).
 _SYS_MODULES_STUBS: list[str] = [
     m for m in _BLOCKED_MODULES
     if not (
@@ -203,7 +203,7 @@ _SYS_MODULES_STUBS: list[str] = [
 #   ctypes / ctypes.*  — OCC loads C extensions via ctypes
 #   importlib.*        — CadQuery uses importlib.metadata, .abc, .resources
 #
-# After CadQuery has been pre-imported in _run_script (R2), we expand the
+# After CadQuery has been pre-imported in _run_script (75 R2), we expand the
 # block list to include ctypes/_ctypes via _harden_post_init_imports().  The set
 # is mutable for that reason — _BlockingMetaPathFinder reads the live set on
 # every find_spec call, so additions take effect for subsequent imports.
@@ -251,6 +251,101 @@ class _NetworkBlockedModule(ModuleType):
         )
 
 
+class _BlockedShellout:
+    """
+    Denier sentinel (1089 Ask 2) that replaces the shell-out globals
+    (`subprocess`, `os`) bound by trimesh's optional `interfaces` submodules.
+
+    trimesh is pre-imported under the real import system (see
+    _preimport_mesh_libs) so a user-script ``import trimesh`` is a cache hit
+    rather than a re-execution that would trip the blocked ``subprocess`` /
+    ``threading`` imports.  Pre-importing, however, leaves
+    ``trimesh.interfaces.generic.subprocess`` reachable as a direct
+    sandbox-escape gadget.  We overwrite those module globals with this
+    sentinel; any attribute access OR call raises.  The manifold3d boolean
+    engine is fully in-process and needs none of these.
+    """
+
+    def __getattr__(self, attr: str) -> Any:
+        raise PermissionError(
+            "[cad-worker] subprocess / shell-out is blocked inside the "
+            "CadQuery sandbox (trimesh interface gadget neutralised)."
+        )
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        raise PermissionError(
+            "[cad-worker] subprocess / shell-out is blocked inside the "
+            "CadQuery sandbox (trimesh interface gadget neutralised)."
+        )
+
+
+_BLOCKED_SHELLOUT = _BlockedShellout()
+
+
+def _preimport_mesh_libs() -> None:
+    """
+    1089 Ask 2 — pre-import the mesh-boolean stack (trimesh + manifold3d)
+    under the real import system, then neutralise trimesh's shell-out gadgets.
+
+    Why pre-import: once the restricted importer is installed, a user-script
+    ``import trimesh`` re-executes trimesh's __init__, whose ``interfaces`` /
+    ``exchange`` chains import ``subprocess`` (blocked) and fail.  Pre-importing
+    here (mirrors the CadQuery R2 pre-import) caches the module so the
+    user-script import is a no-op cache hit.
+
+    Why scrub: pre-importing leaves a ``subprocess`` module global reachable on
+    every trimesh submodule that shells out to an external binary — verified at
+    pin time to be ``trimesh.interfaces.generic`` (blender / openscad / generic
+    mesh scripts), ``trimesh.exchange.ply`` (fast external PLY reader) and
+    ``trimesh.exchange.binvox`` (the binvox voxeliser).  ``trimesh.<x>.
+    subprocess.run([...])`` would be a direct in-process escape gadget, so we
+    overwrite EVERY ``subprocess`` global across the whole ``trimesh`` package
+    (not just one submodule) with a denier.  The ``os`` global on the shell-out
+    interface modules is scrubbed too.  manifold3d — the exact boolean engine
+    trimesh auto-selects — is fully in-process and needs none of them.
+
+    Defence-in-depth note: even an un-scrubbed shell-out would still hit the
+    kernel seccomp filter on ``execve``/``clone`` (SIGSYS); this scrub is the
+    friendly in-process layer that matches the worker's existing
+    layer-responsibility split.  A captured real-``os`` reference inside a
+    trimesh (or cadquery) submodule namespace remains reachable — the same
+    pre-existing class the kernel layer backstops — and is called out in the
+    1089 threat model for SecurityEngineer review.
+
+    Best-effort: if the mesh stack is not installed, mesh tooling is simply
+    unavailable; the worker still serves non-mesh scripts.  We never fail the
+    whole worker on a missing optional dependency.
+    """
+    try:
+        import trimesh  # noqa: PLC0415, F401
+        import manifold3d  # noqa: PLC0415, F401
+    except Exception:  # noqa: BLE001
+        return  # mesh tooling unavailable on this host; non-fatal.
+
+    for mod_name in list(sys.modules):
+        if mod_name != "trimesh" and not mod_name.startswith("trimesh."):
+            continue
+        mod = sys.modules.get(mod_name)
+        if mod is None:
+            continue
+        # Scrub the subprocess shell-out gadget on EVERY trimesh submodule.
+        cur = getattr(mod, "subprocess", None)
+        if isinstance(cur, ModuleType) and getattr(cur, "__name__", "") == "subprocess":
+            try:
+                mod.subprocess = _BLOCKED_SHELLOUT  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001
+                pass
+        # The shell-out interface modules also bind `os` for tempfile plumbing;
+        # they never run under the manifold engine, so scrub it there too.
+        if mod_name == "trimesh.interfaces" or mod_name.startswith("trimesh.interfaces."):
+            cur_os = getattr(mod, "os", None)
+            if isinstance(cur_os, ModuleType) and getattr(cur_os, "__name__", "") == "os":
+                try:
+                    mod.os = _BLOCKED_SHELLOUT  # type: ignore[attr-defined]
+                except Exception:  # noqa: BLE001
+                    pass
+
+
 def _install_network_block() -> None:
     """
     Replace all blocked modules in sys.modules with stubs.
@@ -267,7 +362,7 @@ def _install_network_block() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Restricted `os` proxy (R1 — block os.system / os.exec* / os.fork RCE)
+# Restricted `os` proxy (75 R1 — block os.system / os.exec* / os.fork RCE)
 # ---------------------------------------------------------------------------
 
 # Attributes of `os` that grant process / shell / privilege escalation surface.
@@ -328,7 +423,7 @@ class _RestrictedOs(ModuleType):
     blocked names raise PermissionError so the offending line raises BEFORE
     any side effect.
 
-    R5/R6 — the real os reference is NOT stored on the proxy instance.
+    75 R5/R6 — the real os reference is NOT stored on the proxy instance.
     A previous implementation used ``object.__setattr__(self, "_real_os", os)``,
     which placed the real module in the proxy's ``__dict__`` and was reachable
     via ``os._real_os`` (bypasses __getattr__) and ``vars(os)['_real_os']``.
@@ -338,7 +433,7 @@ class _RestrictedOs(ModuleType):
     real module.
 
     Why a proxy and not a sys.modules swap: kept for symmetry with the original
-    design, but R3 additionally swaps ``sys.modules['os']`` to point at
+    design, but 75 R3 additionally swaps ``sys.modules['os']`` to point at
     this same proxy (see _harden_post_init_imports).  The worker's own
     ``import os`` global is captured at module load (``_REAL_OS``) and is not
     affected by the swap.
@@ -354,7 +449,7 @@ class _RestrictedOs(ModuleType):
         if attr in _OS_BLOCKED_ATTRS:
             raise PermissionError(
                 f"[cad-worker] os.{attr} is not allowed inside the CadQuery "
-                f"sandbox (blocks shell/process escape — R1)."
+                f"sandbox (blocks shell/process escape — 75 R1)."
             )
         # Fall through to the real os module via the module-level reference.
         # AttributeError from getattr is propagated naturally (e.g. os._real_os
@@ -379,8 +474,8 @@ _RESTRICTED_OS: _RestrictedOs = _RestrictedOs()
 
 
 # ---------------------------------------------------------------------------
-# Restricted import / open helpers (CRITICAL-3, HIGH-1, HIGH-2;
-#                                    R1 os proxy routing)
+# Restricted import / open helpers (76 CRITICAL-3, HIGH-1, HIGH-2;
+#                                    75 R1 os proxy routing)
 # ---------------------------------------------------------------------------
 
 def _restricted_import(
@@ -396,7 +491,7 @@ def _restricted_import(
     Raises ImportError for any module in _BLOCKED_MODULES_SET, including
     sub-module paths whose root is blocked (e.g. "ctypes.util" -> "ctypes").
 
-    For `os` (R1) the user-visible binding is the _RESTRICTED_OS proxy,
+    For `os` (75 R1) the user-visible binding is the _RESTRICTED_OS proxy,
     which transparently delegates safe attributes to the real os module while
     raising PermissionError for shell/process/privilege escalation surface.
     `from os.path import X` (where the requested module IS os.path) returns
@@ -458,7 +553,7 @@ def _restricted_open(workdir: str):
 
 
 # ---------------------------------------------------------------------------
-# sys.meta_path blocker (CRITICAL-3 — del sys.modules bypass)
+# sys.meta_path blocker (76 CRITICAL-3 — del sys.modules bypass)
 # ---------------------------------------------------------------------------
 
 class _BlockingMetaPathFinder:
@@ -477,7 +572,7 @@ class _BlockingMetaPathFinder:
         # internals that legitimately need ctypes / importlib.* during cq init.
         # _harden_post_init_imports() expands this set with ctypes/_ctypes after
         # CadQuery has finished its transitive imports, so user-script bypasses
-        # via __import__ also fail (R2).
+        # via __import__ also fail (75 R2).
         if fullname in _META_PATH_BLOCKED:
             raise ImportError(
                 f"[cad-worker] Import blocked: '{fullname}' is not allowed "
@@ -512,7 +607,7 @@ def _harden_post_init_imports() -> None:
          e.g. `sys.modules['ctypes'].CDLL(…)` and `sys.modules['posix'].system(…)`).
 
       2. Replace `sys.modules['os']` with the _RestrictedOs proxy
-         (R3 — closes `sys.modules['os'].system(…)`).  The worker's own
+         (75 R3 — closes `sys.modules['os'].system(…)`).  The worker's own
          `os` global (captured at module load as _REAL_OS) is unaffected.
 
       3. Add the popped names to _META_PATH_BLOCKED so any re-import attempt
@@ -527,7 +622,7 @@ def _harden_post_init_imports() -> None:
       RR3: cad_worker module globals (_REAL_IMPORT, _REAL_OS) are reachable
            via `sys.modules['__main__'].__dict__` / frame walking.  Closing
            this requires either a refactor that puts these references in
-           closures OR OS-level isolation (Option B, see the strategic
+           closures OR OS-level isolation (Option B, see 73 strategic
            note).
     """
     # Layer 1 — direct dict access: drop the cached ctypes / platform-os
@@ -536,7 +631,7 @@ def _harden_post_init_imports() -> None:
     for _name in _post_init_pops:
         sys.modules.pop(_name, None)
 
-    # R3 — `sys.modules['os'].system(…)` bypass.  Replace the cached
+    # 75 R3 — `sys.modules['os'].system(…)` bypass.  Replace the cached
     # real `os` module in sys.modules with the proxy.  The worker's
     # internal references (the module-level `os` import, captured as
     # _REAL_OS) are untouched; CadQuery / OCP / tempfile / json / traceback
@@ -544,7 +639,7 @@ def _harden_post_init_imports() -> None:
     sys.modules["os"] = _RESTRICTED_OS
 
     # Layer 2 — re-import path: extend the meta-path block list to cover
-    # ctypes (R2) and the C-level OS modules (R4).
+    # ctypes (75 R2) and the C-level OS modules (75 R4).
     _META_PATH_BLOCKED.update({
         "ctypes", "ctypes.util", "_ctypes",
         *_PLATFORM_OS_MODULES,
@@ -553,7 +648,7 @@ def _harden_post_init_imports() -> None:
 
 def _harden_builtins() -> None:
     """
-    R7 — patch the real `builtins` module to neutralise the
+    75 R7 — patch the real `builtins` module to neutralise the
     "__builtins__ leak" attack surface.
 
     Background.  Every pre-imported Python module has its `__builtins__`
@@ -610,7 +705,7 @@ def _harden_builtins() -> None:
       - cad_worker module globals (_REAL_IMPORT, _REAL_OS, _REAL_COMPILE,
         _REAL_EXEC) are reachable via `sys.modules['__main__'].__dict__` /
         frame walking.  Closing this requires either a closure refactor or
-        OS-level isolation (Option B, see the strategic note above).
+        OS-level isolation (Option B, see 73 strategic note).
       - R8 (subclass-walk gadget) — out of scope for this round per the
         SecurityEngineer's review.
     """
@@ -645,7 +740,7 @@ def _run_script(script: str, fmt: str, workdir: str) -> dict:
             "message": f"Could not chdir to workdir {workdir!r}: {exc}",
         }
 
-    # Set virtual-address-space ceiling before user code runs (MEDIUM-1).
+    # Set virtual-address-space ceiling before user code runs (76 MEDIUM-1).
     # Note: RLIMIT_AS caps total virtual memory of this process.  CadQuery with
     # OpenCASCADE can map significant virtual address space; if this limit is too
     # tight for a given deployment, raise it here.
@@ -656,12 +751,12 @@ def _run_script(script: str, fmt: str, workdir: str) -> dict:
     except Exception:  # noqa: BLE001
         pass  # RLIMIT_AS not available on this platform (e.g. macOS)
 
-    # R2: pre-import CadQuery here, BEFORE installing the meta-path
+    # 75 R2: pre-import CadQuery here, BEFORE installing the meta-path
     # blocker and network stubs.  This lets cq's transitive imports of ctypes
     # / importlib.metadata / _ctypes resolve through the normal import system.
     # Once cq is loaded, _harden_post_init_imports() drops the cached ctypes
     # modules and adds them to the meta-path block list, closing the
-    # `sys.modules['ctypes']` direct-dict-read bypass identified above.
+    # `sys.modules['ctypes']` direct-dict-read bypass identified in 75.
     try:
         import cadquery as cq  # noqa: PLC0415
     except Exception:  # noqa: BLE001
@@ -674,7 +769,14 @@ def _run_script(script: str, fmt: str, workdir: str) -> dict:
             ),
         }
 
-    # R2: harden ctypes (pop sys.modules + extend meta-path block).
+    # 1089 Ask 2: pre-import the mesh-boolean stack (trimesh + manifold3d)
+    # under the real import system and scrub trimesh's shell-out gadgets. MUST
+    # run AFTER CadQuery init (numpy is shared) and BEFORE _harden / lockdown so
+    # trimesh's transitive subprocess/threading imports resolve normally and the
+    # cached module is what a user-script `import trimesh` resolves to.
+    _preimport_mesh_libs()
+
+    # 75 R2: harden ctypes (pop sys.modules + extend meta-path block).
     # MUST run AFTER CadQuery is imported (so cq's bindings are resolved) and
     # BEFORE the meta-path blocker is installed (so the new entries are honored).
     _harden_post_init_imports()
@@ -686,7 +788,7 @@ def _run_script(script: str, fmt: str, workdir: str) -> dict:
     # Install module stubs in sys.modules (network + process-escape modules).
     _install_network_block()
 
-    # R7: patch the real `builtins` module so cross-module __builtins__
+    # 75 R7: patch the real `builtins` module so cross-module __builtins__
     # access cannot reach the unrestricted `__import__` / `eval` / `exec` /
     # `compile` / `breakpoint` / `input`.  MUST run AFTER CadQuery init (so
     # cq's init can use the real eval/compile if it needs them) and AFTER
@@ -694,7 +796,7 @@ def _run_script(script: str, fmt: str, workdir: str) -> dict:
     # invocation that triggers an import sees the restricted state).
     _harden_builtins()
 
-    # Build restricted __builtins__ for the exec namespace (CRITICAL-3).
+    # Build restricted __builtins__ for the exec namespace (76 CRITICAL-3).
     # Removes eval/exec/compile/breakpoint/input, replaces __import__ with
     # _restricted_import (enforces _BLOCKED_MODULES_SET) and open with
     # _restricted_open (enforces workdir confinement).
@@ -744,7 +846,7 @@ def _run_script(script: str, fmt: str, workdir: str) -> dict:
         }
 
     # Map format to canonical file extension.
-    # dxf/svg are 2D vector formats (DR laser-fab ask). DXF requires
+    # 443 — dxf/svg are 2D vector formats (DR laser-fab ask). DXF requires
     # the user script's `result` be a 2D-projectable Workplane (wires/faces);
     # SVG accepts 2D Workplanes and 3D shapes (projected view). Both are
     # routed through cq.exporters with the matching ExportTypes enum value;
@@ -755,7 +857,7 @@ def _run_script(script: str, fmt: str, workdir: str) -> dict:
     artifact_path = os.path.join(workdir, f"artifact.{ext}")
 
     try:
-        # cq is already imported at the top of _run_script (R2 pre-import).
+        # cq is already imported at the top of _run_script (75 R2 pre-import).
         export_type_map = {
             "stl":   cq.exporters.ExportTypes.STL,
             "3mf":   cq.exporters.ExportTypes.THREEMF,

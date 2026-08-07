@@ -82,7 +82,9 @@ jobs:
           npx vitest run --config ./vitest.config.ts \
             --exclude 'src/sandbox.test.ts' \
             --exclude 'src/worker.test.ts' \
-            --exclude 'src/worker.cad-export.test.ts'
+            --exclude 'src/worker.cad-export.test.ts' \
+            --exclude 'src/worker.intake.test.ts' \
+            --exclude 'src/worker.intake-pat-secret.test.ts'
 
       - name: Run manifest-validator regression test
         # Also covered by "Unit tests" above; named separately so the

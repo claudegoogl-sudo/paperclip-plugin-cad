@@ -1,5 +1,5 @@
 /**
- * Runtime sha256 integrity verification.
+ * Runtime sha256 integrity verification — 215 / 114 §5.2 (rev 4).
  *
  * Spec invariant under test: the plugin runtime MUST verify that the bytes
  * of `worker/seccomp_filter.bpf` and `worker/seccomp_load.py` match the
@@ -88,7 +88,7 @@ function fakeDecision(opts: {
 }
 
 describe.skipIf(!HAS_BLOB)(
-  "runtime sha256 verification of seccomp bootstrap files",
+  "TEST-215: runtime sha256 verification of seccomp bootstrap files",
   () => {
     it("createCadWorker throws on a tampered loader (sha256 mismatch)", () => {
       // Copy the real loader, comment out the prctl call — the canonical

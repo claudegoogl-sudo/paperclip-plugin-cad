@@ -1,29 +1,28 @@
 /**
- * CAD plugin worker — script execution tool surface plus GitHub artifact
- * persistence pipeline.
+ * CAD plugin worker — sub-goals 3 (55) + 5 (56)
  *
  * Tool surface (operator-confirmed via approval f420bc31):
  *   cad.run_script  — execute CadQuery Python → staged artifact
  *   cad.export      — staged artifact → GitHub commit + permalink
  *
- * Tool framework:
+ * 55 framework (AC2–AC6):
  *   - Input validation: structured validation_error (400) with no stack traces.
  *   - Metrics: ctx.metrics.write for tool.calls, tool.errors, tool.duration_ms.
  *   - Correlation log: "tool call complete" with correlationId/tool/agentId/status/durationMs.
  *   - No payload content in any log call.
  *
- * GitHub push security rules:
+ * 56 security rules:
  *   - PAT resolved via ctx.secrets.resolve(config.githubPatSecretId) per call.
  *   - PAT never logged, stored, returned, or tagged in metrics.
  *   - PAT goes out of scope at function return.
  *
- * Push error taxonomy:
+ * Push error taxonomy (56 AC4):
  *   "auth"                 — 401/403: rotate PAT, no retry.
  *   "network"              — 5xx / network error / fetch timeout: transient, surface to agent.
  *   "conflict"             — 409/422: re-fetch SHA and retry once (inline).
  *   "prerequisite_missing" — repo 404/403: operator must pre-create repo.
  *
- * Security review fixes (commit ba36ef1 review):
+ * 56 / 74 SecurityEngineer review fixes (commit ba36ef1 review):
  *   F1 — Path-traversal allowlist on paperclipTicketId/toolCallId/filename,
  *        post-build path normalization assertion, per-segment URL encoding.
  *   F2 — Subsumed by F1 (allowlist excludes newlines + commit-message trailers).
@@ -36,11 +35,22 @@ import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
 import * as path from "node:path";
 
-// INTEGRATION SWITCH: real CadQuery sandbox client.
+// INTEGRATION SWITCH (sub-goal 2 / 54): real CadQuery sandbox client.
 import {
   renderCadQuery,
   DEFAULT_TIMEOUT_SECONDS as WORKER_DEFAULT_TIMEOUT,
 } from "./cad-worker-client.js";
+
+// 1089 Ask 1: host-mediated scan intake-fetch.
+import {
+  parseInputArtifacts,
+  fetchInputArtifacts,
+  assertSafeCompanyId,
+  IntakeError,
+  MAX_INPUT_FILES,
+  MAX_TOTAL_INPUT_BYTES,
+  type InputFile,
+} from "./cad-intake.js";
 
 // ---------------------------------------------------------------------------
 // Config shape
@@ -48,6 +58,10 @@ import {
 
 interface CadPluginConfig {
   githubPatSecretId: string;
+  // 1094: optional read-only intake PAT. Intake resolves
+  // `intakePatSecretId ?? githubPatSecretId`; export always uses
+  // githubPatSecretId. Unset → byte-identical shared-PAT behaviour.
+  intakePatSecretId?: string;
   artifactRepoUrl?: string;
   artifactRepoBranch?: string;
 }
@@ -59,7 +73,7 @@ const DEFAULT_ARTIFACT_BRANCH = "main";
 // ---------------------------------------------------------------------------
 // Artifact staging map (cad.run_script → cad.export handoff)
 //
-// Plugin workers are shared across all agents/companies on a host
+// 80 (F6): plugin workers are shared across all agents/companies on a host
 // (one worker per plugin per Paperclip instance — see plugin-worker-manager and
 // PLUGIN_SPEC.md §12). Keying the staging map by `artifactId` alone would let
 // agent B in company Y read agent A in company X's staged artifact if the id
@@ -69,19 +83,93 @@ const DEFAULT_ARTIFACT_BRANCH = "main";
 // the same "not found" error path as missing entries (no oracle).
 // ---------------------------------------------------------------------------
 
-interface StagingEntry {
+export interface StagingEntry {
   script: string;
   stepPath: string;
+  // 1089 Ask 1: scan inputs fetched at run_script time, retained so a later
+  // cad.export (which re-runs the script for non-step formats) can re-stage them.
+  // Tenant-scoped via the staging-map key, same as the rest of the entry.
+  inputs?: InputFile[];
 }
 
 const artifactStagingMap = new Map<string, StagingEntry>();
+
+// 1089 SE-2: the staging map lives in the long-lived, tenant-shared Node
+// plugin-worker process (outside the python RLIMIT_AS), and each entry can now
+// retain up to MAX_TOTAL_INPUT_BYTES of fetched scan bytes for cad.export
+// re-render. Without a bound, a loop of run_script calls with large inputs grows
+// host RSS until the shared worker OOMs — a cross-tenant DoS. Cap the *total*
+// retained input bytes across the whole map and evict oldest-first. The map
+// iterates in insertion order, so the just-inserted (newest) entry is evicted
+// last; a single entry is <= MAX_TOTAL_INPUT_BYTES < the cap, so the active call
+// is never stripped of its own inputs. Evicting only drops `.inputs` (a later
+// cad.export degrades to a no-input re-render, failing closed) while leaving the
+// tiny script/stepPath entry intact for step-format exports.
+export const MAX_RETAINED_INPUT_BYTES = 2 * MAX_TOTAL_INPUT_BYTES; // 240 MiB
+
+function entryInputBytes(entry: StagingEntry): number {
+  let n = 0;
+  for (const f of entry.inputs ?? []) n += f.bytes.byteLength;
+  return n;
+}
+
+export function enforceRetainedInputCap(
+  map: Map<string, StagingEntry> = artifactStagingMap,
+  cap: number = MAX_RETAINED_INPUT_BYTES,
+): void {
+  let total = 0;
+  for (const entry of map.values()) total += entryInputBytes(entry);
+  if (total <= cap) return;
+  for (const entry of map.values()) {
+    if (total <= cap) break;
+    const freed = entryInputBytes(entry);
+    if (freed === 0) continue;
+    entry.inputs = undefined;
+    total -= freed;
+  }
+}
+
+// 1101: enforceRetainedInputCap (SE-2) bounds only retained `.inputs` bytes;
+// it never removes a whole entry, so the staging map's ENTRY COUNT is still
+// unbounded. Every run_script call inserts an entry keyed by a fresh artifactId
+// and the only later mutation is `.inputs = undefined`. Across the long-lived,
+// tenant-shared worker, a loop of run_script calls (even zero-input ones, whose
+// retained `script` string SE-2 does not count) grows the map and its retained
+// script bytes without bound — a slower cross-tenant DoS. Cap the entry count and
+// evict whole oldest entries (Map iterates in insertion order, so the just-staged
+// newest entry survives as long as the cap is >= 1). A later cad.export on an
+// evicted artifactId falls through to the SAME "not found" path as a missing
+// entry — fails closed, no oracle, identical posture to the 80 key mismatch.
+export const MAX_STAGING_ENTRIES = 256;
+
+export function enforceStagingEntryCap(
+  map: Map<string, StagingEntry> = artifactStagingMap,
+  cap: number = MAX_STAGING_ENTRIES,
+): void {
+  if (map.size <= cap) return;
+  // Map.keys() yields oldest-first; deleting already-/currently-visited keys
+  // during iteration is well-defined. Drop from the front until at the cap.
+  for (const key of map.keys()) {
+    if (map.size <= cap) break;
+    map.delete(key);
+  }
+}
+
+// 1101: cap the per-call script size at intake. The retained `script` string
+// lives in the shared worker's staging entry, and SE-2's enforceRetainedInputCap
+// counts only `.inputs` bytes — so an uncapped multi-MB script survives every
+// SE-2 eviction. Real CadQuery scripts are KB-scale; 256 KiB is generous headroom
+// while bounding worst-case retained script memory to
+// MAX_STAGING_ENTRIES * MAX_SCRIPT_BYTES (64 MiB). Measured in UTF-8 bytes, not
+// JS string length, so multi-byte characters cannot smuggle past the cap.
+export const MAX_SCRIPT_BYTES = 256 * 1024; // 256 KiB
 
 function stagingMapKey(companyId: string, agentId: string, artifactId: string): string {
   return `${companyId}:${agentId}:${artifactId}`;
 }
 
 // ---------------------------------------------------------------------------
-// Typed push errors
+// Typed push errors (56)
 // ---------------------------------------------------------------------------
 
 type PushErrorKind = "auth" | "network" | "conflict" | "prerequisite_missing";
@@ -98,7 +186,7 @@ class PushError extends Error {
 }
 
 // ---------------------------------------------------------------------------
-// Structured error helpers
+// 55 structured error helpers
 // ---------------------------------------------------------------------------
 
 function validationError(message: string) {
@@ -110,7 +198,7 @@ function workerInternalError(message: string) {
 }
 
 // ---------------------------------------------------------------------------
-// Metrics + correlation-log helpers
+// 55 metrics + correlation-log helpers
 // ---------------------------------------------------------------------------
 
 interface RunCtx {
@@ -158,7 +246,7 @@ const FILENAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 function validateTicketId(value: string): string | null {
   if (!TICKET_ID_RE.test(value)) {
-    return "paperclipTicketId must match ^[A-Z][A-Z0-9]{1,9}-[0-9]{1,9}$ (e.g. ABC-123)";
+    return "paperclipTicketId must match ^[A-Z][A-Z0-9]{1,9}-[0-9]{1,9}$ (e.g. 56)";
   }
   return null;
 }
@@ -182,13 +270,17 @@ function validateFilename(value: string): string | null {
 
 /**
  * F1 layer 2: post-build assertion. Any input that survives the per-component
- * allowlist must, after POSIX normalization, still start with "artifacts/" and
- * be byte-identical to the un-normalized form. Fail-closed on any drift.
+ * allowlist must, after POSIX normalization, still start with the caller's
+ * tenant prefix `artifacts/<companyId>/` (1099 SE-1) and be byte-identical to
+ * the un-normalized form. Fail-closed on any drift.
  */
-function assertSafeRepoPath(repoPath: string): string | null {
+function assertSafeRepoPath(repoPath: string, companyId: string): string | null {
   const normalized = path.posix.normalize(repoPath);
   if (normalized !== repoPath) return "internal: repoPath would normalize differently (path traversal blocked)";
-  if (!normalized.startsWith("artifacts/")) return "internal: repoPath must start with 'artifacts/'";
+  const tenantPrefix = `artifacts/${companyId}/`;
+  if (!normalized.startsWith(tenantPrefix)) {
+    return `internal: repoPath must start with '${tenantPrefix}' (tenant scoping)`;
+  }
   return null;
 }
 
@@ -214,7 +306,7 @@ function fetchSignal(): AbortSignal {
 }
 
 // ---------------------------------------------------------------------------
-// GitHub API helpers
+// GitHub API helpers (56)
 // ---------------------------------------------------------------------------
 
 function githubHeaders(pat: string): Record<string, string> {
@@ -267,11 +359,11 @@ async function checkRepoPrerequisite(pat: string, repoUrl: string): Promise<void
   }
   if (resp.status === 404) {
     throw new PushError("prerequisite_missing",
-      `Artifact repo not found (404): ${owner}/${repo}. Operator must pre-create the repo and grant PAT access.`, 404);
+      `Artifact repo not found (404): ${owner}/${repo}. Operator must pre-create the repo and grant PAT access. See 56 AC#1.`, 404);
   }
   if (resp.status === 401 || resp.status === 403) {
     throw new PushError("prerequisite_missing",
-      `Artifact repo not accessible (${resp.status}): ${owner}/${repo}. Verify PAT has repo scope.`, resp.status);
+      `Artifact repo not accessible (${resp.status}): ${owner}/${repo}. Verify PAT has repo scope. See 56 AC#1.`, resp.status);
   }
   if (!resp.ok) {
     throw new PushError("network", `Unexpected ${resp.status} checking ${owner}/${repo}. Retry later.`, resp.status);
@@ -363,8 +455,12 @@ async function pushArtifactToGitHub(
 // CadQuery render helpers
 // ---------------------------------------------------------------------------
 
-async function renderCadScript(script: string, timeoutSeconds = WORKER_DEFAULT_TIMEOUT): Promise<string> {
-  const result = await renderCadQuery(script, "step", timeoutSeconds);
+async function renderCadScript(
+  script: string,
+  timeoutSeconds = WORKER_DEFAULT_TIMEOUT,
+  inputFiles?: InputFile[],
+): Promise<string> {
+  const result = await renderCadQuery(script, "step", timeoutSeconds, undefined, inputFiles);
   if (!result.ok) throw new Error(`[${result.error}] ${result.message}`);
   return result.artifactPath;
 }
@@ -374,7 +470,9 @@ async function exportToFormat(
   format: "step" | "stl" | "3mf" | "dxf" | "svg",
 ): Promise<string> {
   if (format === "step") return entry.stepPath;
-  const result = await renderCadQuery(entry.script, format, WORKER_DEFAULT_TIMEOUT);
+  // Re-runs the script — re-stage the same scan inputs so input-dependent scripts
+  // (e.g. StlAPI_Reader("inputs/scan.stl")) export correctly (1089 Ask 1).
+  const result = await renderCadQuery(entry.script, format, WORKER_DEFAULT_TIMEOUT, undefined, entry.inputs);
   if (!result.ok) throw new Error(`[${result.error}] Export to ${format} failed: ${result.message}`);
   return result.artifactPath;
 }
@@ -391,9 +489,9 @@ const plugin = definePlugin({
     // ------------------------------------------------------------------
     // cad.run_script (manifest tool name = "cad.run_script"; host parses the
     // namespaced name `platform.cad:cad.run_script` via lastIndexOf(":") and
-    // RPC-dispatches the worker with bare key "cad.run_script". The public
-    // tool surface was switched from `cad:<verb>` (rejected by the
-    // tightened manifest validator — `:` is not allowed) to
+    // RPC-dispatches the worker with bare key "cad.run_script". 374
+    // switched the public tool surface from `cad:<verb>` (rejected by the
+    // tightened 163 manifest validator — `:` is not allowed) to
     // `cad.<verb>` and the register keys here must follow.)
     // ------------------------------------------------------------------
     ctx.tools.register(
@@ -404,8 +502,29 @@ const plugin = definePlugin({
         parametersSchema: {
           type: "object",
           properties: {
-            script: { type: "string", description: "CadQuery Python script." },
+            script: { type: "string", maxLength: MAX_SCRIPT_BYTES, description: "CadQuery Python script (max 256 KiB)." },
             timeout: { type: "integer", minimum: 1, maximum: 300, description: "Timeout (seconds, default 30)." },
+            inputArtifacts: {
+              type: "array",
+              maxItems: MAX_INPUT_FILES,
+              items: {
+                type: "object",
+                properties: {
+                  repoPath: {
+                    type: "string",
+                    description:
+                      "Path of an uploaded scan in the cad-artifacts repo (under user-uploads/, or your own tenant's " +
+                      "artifacts/<companyId>/ subtree — cross-tenant artifacts/ paths are rejected). " +
+                      "Fetched by the host and staged into the sandbox at inputs/<basename>; read it via StlAPI_Reader('inputs/<basename>').",
+                  },
+                },
+                required: ["repoPath"],
+                additionalProperties: false,
+              },
+              description:
+                "Optional scan/mesh files to stage into the sandbox before the script runs (1089). " +
+                "Per-file 50 MiB cap, 120 MiB total, max 3 files.",
+            },
           },
           required: ["script"],
           additionalProperties: false,
@@ -429,6 +548,14 @@ const plugin = definePlugin({
           logCompletion(ctx, tool, runCtx, ms, "error");
           return validationError("script is required and must be a non-empty string");
         }
+        // 1101: reject oversized scripts before staging/rendering. Measured in
+        // UTF-8 bytes so multi-byte characters can't bypass the staging-memory cap.
+        if (Buffer.byteLength(p.script, "utf8") > MAX_SCRIPT_BYTES) {
+          const ms = Date.now() - t0;
+          await emitMetrics(anyCtx, tool, ms, true);
+          logCompletion(ctx, tool, runCtx, ms, "error");
+          return validationError(`script exceeds maximum size of ${MAX_SCRIPT_BYTES} bytes`);
+        }
         if (p.timeout !== undefined) {
           const t = p.timeout;
           if (typeof t !== "number" || !Number.isInteger(t) || t < 1 || t > 300) {
@@ -442,7 +569,7 @@ const plugin = definePlugin({
         const script = p.script as string;
         const timeoutSeconds = typeof p.timeout === "number" ? p.timeout : WORKER_DEFAULT_TIMEOUT;
 
-        // companyId+agentId are required to scope the staging map
+        // 80 (F6): companyId+agentId are required to scope the staging map
         // entry to the calling tenant. Without them we cannot safely store the
         // artifact, since any later caller would match the un-scoped key.
         if (typeof runCtx.companyId !== "string" || runCtx.companyId.length === 0 ||
@@ -454,11 +581,56 @@ const plugin = definePlugin({
           return validationError("missing tenant context (companyId/agentId) on runCtx");
         }
 
-        ctx.logger.info("cad.run_script: rendering", { scriptLength: script.length, timeoutSeconds });
+        // 1089 Ask 1: host-mediated scan intake. Validate the inputArtifacts
+        // array + per-path allowlist + count cap, then fetch each file with the
+        // export PAT (binary-safe, size-capped) BEFORE rendering. Any failure is
+        // a structured tool error — never silent, never a partial input set.
+        let inputFiles: InputFile[] = [];
+        // 1099 SE-1: scope intake to the caller's tenant subtree. companyId
+        // is proven non-empty by the tenant-context gate above; the intake
+        // allowlist re-validates it and fails closed if it is malformed.
+        const parsedInputs = parseInputArtifacts(p.inputArtifacts, runCtx.companyId);
+        if ("error" in parsedInputs) {
+          const ms = Date.now() - t0;
+          await emitMetrics(anyCtx, tool, ms, true);
+          logCompletion(ctx, tool, runCtx, ms, "error");
+          return validationError(parsedInputs.error);
+        }
+        if (parsedInputs.repoPaths.length > 0) {
+          const config = (await ctx.config.get()) as unknown as CadPluginConfig;
+          // 1094 separation-of-duties: intake reads via the optional
+          // read-only intakePatSecretId, falling back to the shared
+          // githubPatSecretId when unset (back-compat). Export is untouched.
+          const intakeSecretId = config.intakePatSecretId ?? config.githubPatSecretId;
+          if (!intakeSecretId) {
+            const ms = Date.now() - t0;
+            await emitMetrics(anyCtx, tool, ms, true);
+            logCompletion(ctx, tool, runCtx, ms, "error");
+            return { data: { error: "prerequisite_missing", message: "inputArtifacts requires githubPatSecretId (or intakePatSecretId) to be configured." } };
+          }
+          const repoUrl = config.artifactRepoUrl ?? DEFAULT_ARTIFACT_REPO_URL;
+          const branch = config.artifactRepoBranch ?? DEFAULT_ARTIFACT_BRANCH;
+          ctx.logger.info("cad.run_script: fetching inputArtifacts", { count: parsedInputs.repoPaths.length, intakePat: config.intakePatSecretId ? "dedicated" : "shared" });
+          const pat = await ctx.secrets.resolve(intakeSecretId);
+          try {
+            inputFiles = await fetchInputArtifacts(pat, repoUrl, branch, parsedInputs.repoPaths);
+          } catch (err) {
+            if (err instanceof IntakeError) {
+              ctx.logger.warn("cad.run_script: intake fetch failed", { kind: err.kind, httpStatus: err.httpStatus });
+              const ms = Date.now() - t0;
+              await emitMetrics(anyCtx, tool, ms, true);
+              logCompletion(ctx, tool, runCtx, ms, "error");
+              return { data: { error: err.kind, message: err.message } };
+            }
+            throw err;
+          }
+        }
+
+        ctx.logger.info("cad.run_script: rendering", { scriptLength: script.length, timeoutSeconds, inputCount: inputFiles.length });
 
         let stepPath: string;
         try {
-          stepPath = await renderCadScript(script, timeoutSeconds);
+          stepPath = await renderCadScript(script, timeoutSeconds, inputFiles);
         } catch (err) {
           const msg = err instanceof Error ? err.message : "Unknown worker error";
           ctx.logger.warn("cad.run_script: worker error", { error: msg });
@@ -469,11 +641,16 @@ const plugin = definePlugin({
         }
 
         const artifactId = `cad-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        // Key by tuple sourced from runCtx, never from agent input.
+        // 80 (F6): key by tuple sourced from runCtx, never from agent input.
         artifactStagingMap.set(
           stagingMapKey(runCtx.companyId, runCtx.agentId, artifactId),
-          { script, stepPath },
+          { script, stepPath, inputs: inputFiles.length > 0 ? inputFiles : undefined },
         );
+        // 1101: bound the staging map's entry count (whole-entry eviction)
+        // before the SE-2 input-byte cap trims `.inputs` on the survivors.
+        enforceStagingEntryCap();
+        // 1089 SE-2: bound total retained input bytes across the shared map.
+        enforceRetainedInputCap();
         ctx.logger.info("cad.run_script: staged", { artifactId });
 
         const ms = Date.now() - t0;
@@ -488,11 +665,11 @@ const plugin = definePlugin({
     );
 
     // ------------------------------------------------------------------
-    // cad.export  (tool surface + GitHub commit pipeline)
+    // cad.export  (55 tool surface + 56 GitHub commit pipeline)
     // Manifest tool name = "cad.export"; host parses
     // `platform.cad:cad.export` via lastIndexOf(":") and dispatches the
-    // worker with bare key "cad.export". The dot-rename — the colon
-    // form is rejected by the manifest validator.
+    // worker with bare key "cad.export". 374 dot-rename — the colon
+    // form is rejected by the 163 manifest validator.
     // ------------------------------------------------------------------
     ctx.tools.register(
       "cad.export",
@@ -507,7 +684,7 @@ const plugin = definePlugin({
             artifactId: { type: "string", description: "Artifact ID from cad.run_script." },
             format: {
               type: "string",
-              // Keep enum in lockstep with manifest.ts; DR laser-fab
+              // 443 — keep enum in lockstep with manifest.ts; DR laser-fab
               // ask added 2D vector outputs (dxf, svg) routed to CadQuery's
               // ExportTypes.DXF / ExportTypes.SVG in cad_worker.py.
               enum: ["step", "stl", "3mf", "dxf", "svg"],
@@ -516,7 +693,7 @@ const plugin = definePlugin({
             paperclipTicketId: {
               type: "string",
               pattern: "^[A-Z][A-Z0-9]{1,9}-[0-9]{1,9}$",
-              description: "Paperclip ticket ID (e.g. ABC-123) for path/commit message.",
+              description: "Paperclip ticket ID (e.g. 56) for path/commit message.",
             },
             toolCallId: {
               type: "string",
@@ -619,7 +796,7 @@ const plugin = definePlugin({
 
         ctx.logger.info("cad.export: starting", { artifactId, format });
 
-        // Scoped lookup by (companyId, agentId, artifactId). If the
+        // 80 (F6): scoped lookup by (companyId, agentId, artifactId). If the
         // calling runCtx does not match the entry's caller, fall through to the
         // SAME error response as a genuinely missing entry — do not distinguish,
         // to avoid an oracle that lets one tenant probe another's id space.
@@ -638,7 +815,7 @@ const plugin = definePlugin({
           return workerInternalError(`No staged artifact for artifactId: ${artifactId}. Call cad.run_script first.`);
         }
 
-        // Local-file export path (no GitHub params — used by local-only tests).
+        // Local-file export path (no GitHub params — pre-56 compat / 55 tests).
         if (!paperclipTicketId || !toolCallId) {
           try {
             const filePath = await exportToFormat(stagingEntry, format);
@@ -655,7 +832,7 @@ const plugin = definePlugin({
           }
         }
 
-        // --- GitHub commit pipeline ---
+        // --- 56 GitHub commit pipeline ---
         const config = (await ctx.config.get()) as unknown as CadPluginConfig;
         if (!config.githubPatSecretId) {
           const ms = Date.now() - t0;
@@ -672,15 +849,27 @@ const plugin = definePlugin({
         const filenameRaw = filename as string | undefined;
         // Default filename: artifact.<format>. format is enum-validated.
         const resolvedFilename = filenameRaw ?? `artifact.${format}`;
+        // 1099 SE-1: write under the caller's tenant subtree. companyId is
+        // sourced from runCtx (never caller-supplied) and proven present by the
+        // staging-map lookup above; re-validate as a path segment, fail-closed.
+        const companyId = runCtx.companyId as string;
+        const cidErr = assertSafeCompanyId(companyId);
+        if (cidErr) {
+          ctx.logger.warn("cad.export: companyId assertion failed", { cidErr });
+          const ms = Date.now() - t0;
+          await emitMetrics(anyCtx, tool, ms, true);
+          logCompletion(ctx, tool, runCtx, ms, "error");
+          return validationError(`internal: ${cidErr}`);
+        }
         // resolvedFilename was either explicit (validated) or derived from the
         // enum format ("artifact.step" / "artifact.stl" / "artifact.3mf"); the
         // derived form is allowlist-safe by construction.
-        const repoPath = `artifacts/${ticketIdStr}/${toolCallIdStr}/${resolvedFilename}`;
+        const repoPath = `artifacts/${companyId}/${ticketIdStr}/${toolCallIdStr}/${resolvedFilename}`;
         // F1 layer 2 — fail-closed if anything would normalize to a different
-        // path or escape the artifacts/ subtree. Defence-in-depth: should be
-        // unreachable after the allowlist regexes, but the assertion is the
-        // authoritative guard.
-        const pathErr = assertSafeRepoPath(repoPath);
+        // path or escape the artifacts/<companyId>/ subtree. Defence-in-depth:
+        // should be unreachable after the allowlist regexes, but the assertion is
+        // the authoritative guard.
+        const pathErr = assertSafeRepoPath(repoPath, companyId);
         if (pathErr) {
           ctx.logger.warn("cad.export: repoPath assertion failed", { pathErr });
           const ms = Date.now() - t0;

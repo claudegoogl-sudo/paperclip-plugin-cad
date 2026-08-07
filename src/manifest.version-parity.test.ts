@@ -1,5 +1,5 @@
 /**
- * Manifest/package.json version parity gate.
+ * 443 follow-up — manifest/package.json version parity gate.
  *
  * v0.1.3 shipped with package.json.version="0.1.3" but src/manifest.ts
  * still carrying version: "0.1.2". The tarball filename and git tag
@@ -20,7 +20,7 @@ const pkg = JSON.parse(
   readFileSync(join(__dirname, "..", "package.json"), "utf8"),
 );
 
-describe("manifest/package.json version parity", () => {
+describe("manifest/package.json version parity (443 follow-up)", () => {
   it("manifest.version === package.json.version", () => {
     expect(manifest.version).toBe(pkg.version);
   });

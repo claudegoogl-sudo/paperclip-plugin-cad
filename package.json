@@ -1,6 +1,6 @@
 {
   "name": "@platform/paperclip-plugin-cad",
-  "version": "0.1.6",
+  "version": "0.1.11",
   "type": "module",
   "private": true,
   "description": "CadQuery plugin for Paperclip — lets agents design and render 3D CAD models via tool calls",
@@ -16,11 +16,13 @@
     "check:release-tarball": "node ./scripts/check-release-tarball.mjs --keep",
     "check:release-tarball:self-test": "node ./scripts/check-release-tarball.mjs --self-test",
     "check:drift": "node ./scripts/check-live-drift.mjs",
-    "prepack": "make -C worker && npm run build && npm run validate:manifest"
+    "write:dist-hashes": "node ./scripts/write-dist-hashes.mjs",
+    "prepack": "make -C worker && npm run build && npm run write:dist-hashes && npm run validate:manifest"
   },
   "files": [
     "dist/",
     "!dist/**/*.map",
+    "dist.sha256",
     "src/cad_worker.py",
     "src/manifest.ts",
     "src/cad-worker-client.ts",

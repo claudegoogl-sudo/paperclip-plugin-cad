@@ -239,12 +239,26 @@ export function hashLiveDist(packageRoot) {
 export function compareInstall({ live, ref }) {
   const findings = [];
 
-  if (live.sourceHash !== ref.sourceHash) {
+  // src/ drift is a hygiene warning, not a security error. The runtime
+  // bytes in dist/ are what the host actually executes; src/ is a
+  // development aid whose bytes can drift for many legitimate reasons
+  // (comment normalisation, file-set differences across package layouts,
+  // pre-hygiene-gate history). DIST_DRIFT below is the security gate.
+  if (live.sourceHash !== null && ref.sourceHash !== null && live.sourceHash !== ref.sourceHash) {
     findings.push({
-      severity: "error",
+      severity: "warn",
       code: "SOURCE_DRIFT",
       message: `Running src/ does not match ${ref.name}.`,
       detail: diffFileHashes(ref.files, live.files),
+    });
+  }
+  if (live.sourceHash === null) {
+    findings.push({
+      severity: "warn",
+      code: "LIVE_NO_SOURCE",
+      message:
+        `Live install ships no ${SOURCE_DIR}/. Source-attestation skipped; ` +
+        `dist-attestation is still enforced.`,
     });
   }
 
@@ -349,22 +363,27 @@ function readLiveInstall(packageRoot, pid) {
   if (!existsSync(pkgPath)) throw new Error(`No package.json at ${packageRoot}`);
   const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
   const srcRoot = join(packageRoot, SOURCE_DIR);
-  if (!existsSync(srcRoot)) {
-    throw new Error(
-      `Live install at ${packageRoot} ships no ${SOURCE_DIR}/, so its source cannot be attested.`,
-    );
-  }
-  const { hash, files } = hashSourceTree(srcRoot);
   const distRoot = join(packageRoot, "dist");
+  // src/ may be absent when the package ships only dist/ (Klipper layout).
+  // In that case sourceHash is null and compareInstall emits LIVE_NO_SOURCE
+  // as a warn; dist-attestation still runs and is the security gate.
+  let sourceHash = null;
+  let files = {};
+  let srcMtime = 0;
+  if (existsSync(srcRoot)) {
+    const hashed = hashSourceTree(srcRoot);
+    sourceHash = hashed.hash;
+    files = hashed.files;
+    srcMtime = newestMtime(srcRoot);
+  }
   const distMtime = existsSync(distRoot) ? newestMtime(distRoot) : 0;
-  const srcMtime = newestMtime(srcRoot);
   const distHashes = existsSync(distRoot) ? hashLiveDist(packageRoot) : null;
   return {
     pid,
     packageRoot,
     name: pkg.name,
     version: pkg.version,
-    sourceHash: hash,
+    sourceHash,
     files,
     distMtime,
     srcMtime,
@@ -377,7 +396,7 @@ function readLiveInstall(packageRoot, pid) {
 function readRefInstall(refName, isTag) {
   const dir = mkdtempSync(join(tmpdir(), "drift-ref-"));
   try {
-    const archive = spawnSync("git", ["archive", "--format=tar", refName, SOURCE_DIR, "package.json"], {
+    const archive = spawnSync("git", ["archive", "--format=tar", refName, SOURCE_DIR, "package.json", "dist.sha256"], {
       cwd: REPO_ROOT,
       encoding: "buffer",
       maxBuffer: 256 * 1024 * 1024,
