@@ -837,9 +837,14 @@ describe("AC1+AC8 — cad.run_script end-to-end via worker.ts", () => {
     const runScript = handlers["cad.run_script"];
     expect(runScript).toBeDefined();
 
-    const result = (await runScript({
-      script: "import cadquery as cq\nresult = cq.Workplane('XY').box(1, 1, 1)",
-    })) as { data?: { artifactId?: string; error?: string } };
+    const result = (await runScript(
+      {
+        script: "import cadquery as cq\nresult = cq.Workplane('XY').box(1, 1, 1)",
+      },
+      // The handler keys staged artifacts by (companyId, agentId, artifactId)
+      // so the tenant scope must be present on runCtx before it will stage.
+      { companyId: "test-co", agentId: "test-agent", runId: "test-run" },
+    )) as { data?: { artifactId?: string; error?: string };
 
     // AC1: succeeds and returns an artifactId.
     expect(result.data?.error).toBeUndefined();
