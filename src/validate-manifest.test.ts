@@ -1,8 +1,8 @@
 /**
- * Regression coverage for the release-time manifest gate.
+ * 376 — regression coverage for the release-time manifest gate.
  *
  * Proves the gate (`scripts/validate-manifest.mjs`) catches the exact
- * v0.1.1 incident: a tool name containing `:`, which the tightened
+ * v0.1.1 incident: a tool name containing `:`, which the post-163
  * host plugin-manifest validator rejects. If this test ever starts
  * passing the offending manifest, the gate has regressed and the
  * v0.1.1-class incident can re-occur.
@@ -25,7 +25,7 @@ function fixture(toolName: string) {
     apiVersion: 1 as const,
     version: "0.1.0",
     displayName: "CAD Test Plugin",
-    description: "fixture for manifest-gate regression coverage",
+    description: "fixture for 376 regression coverage",
     author: "Platform",
     categories: ["connector"] as const,
     capabilities: ["agent.tools.register"] as const,
@@ -41,7 +41,7 @@ function fixture(toolName: string) {
   };
 }
 
-describe("validate-manifest gate", () => {
+describe("validate-manifest gate (376)", () => {
   it("rejects a manifest with a colon in tools[].name (the v0.1.1 incident)", () => {
     const result = validateManifest(fixture("bad:name"));
     expect(result.ok).toBe(false);
@@ -82,7 +82,7 @@ describe("validate-manifest gate", () => {
 
   it("rejects manifest missing required pluginManifestV1Schema fields", () => {
     // No tools, but also no capabilities/entrypoints/etc. — exercises the
-    // upstream zod schema branch (not just the mirrored validator).
+    // upstream zod schema branch (not just the 163 mirror).
     const result = validateManifest({ id: "x" } as unknown as ReturnType<typeof fixture>);
     expect(result.ok).toBe(false);
     if (result.ok) return;

@@ -1,7 +1,7 @@
 import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
 
 /**
- * Exported pin constants for **runtime** sha256
+ * 215 / 114 §5.2 — exported pin constants for **runtime** sha256
  * verification.
  *
  * The literal placeholders below are substituted by `esbuild.config.mjs`
@@ -12,14 +12,14 @@ import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
  * verifier in `cad-worker-client.ts` reads these constants and refuses
  * to launch the worker on either a sha256 mismatch OR an unsubstituted
  * placeholder (length ≠ 64 hex chars). The dual placeholder substitution
- * is what closes the substitution-attack window — a build
+ * is what closes the rev-4 §5.2 substitution-attack window — a build
  * that fails to substitute is fail-closed at the first launch.
  */
 export const SECCOMP_FILTER_SHA256_PIN = "__PLA114_SECCOMP_FILTER_SHA256__";
 export const SECCOMP_LOADER_SHA256_PIN = "__PLA114_SECCOMP_LOADER_SHA256__";
 
 /**
- * Declare the kernel-sandbox requirement in the
+ * 114 / 106 §5.2 — declare the kernel-sandbox requirement in the
  * manifest. The host capability negotiation refuses to install the plugin
  * on a host that does not advertise this requirement met (bubblewrap on
  * PATH). The SDK manifest type does not yet model this field, so we extend
@@ -33,7 +33,7 @@ type ManifestWithRuntimeRequirements = PaperclipPluginManifestV1 & {
   };
   /**
    * Build-manifest pin for the seccomp filter blob AND the python-side
-   * loader shim (pins **both**
+   * loader shim (114 / 106 §5.2 rev 4: pins **both**
    * `seccomp_filter.bpf` AND `seccomp_load.py`; runtime hard-errors on
    * either mismatch). The dual pin closes the substitution-attack window
    * where an attacker swaps the loader (which calls `prctl(PR_SET_SECCOMP)`)
@@ -53,9 +53,9 @@ type ManifestWithRuntimeRequirements = PaperclipPluginManifestV1 & {
 
 // `__PLUGIN_VERSION__` is substituted at build time from
 // `package.json.version` by esbuild's `define` (see `esbuild.config.mjs`).
-// `package.json.version` is the single source of truth so the
+// 526 made `package.json.version` the single source of truth so the
 // installed plugin's reported version cannot drift from the package
-// version (a manual-edit miss in one and not the other would otherwise regress).
+// version (443 was a manual-edit miss that this structural fix prevents).
 const manifest: ManifestWithRuntimeRequirements = {
   id: "platform.cad",
   apiVersion: 1,
@@ -71,8 +71,8 @@ const manifest: ManifestWithRuntimeRequirements = {
 
   // Capabilities (v0.1.0):
   //   agent.tools.register — register cad.run_script and cad.export
-  //   http.outbound        — GitHub Contents API push
-  //   secrets.read-ref     — ctx.secrets.resolve for GitHub PAT
+  //   http.outbound        — GitHub Contents API push (56)
+  //   secrets.read-ref     — ctx.secrets.resolve for GitHub PAT (47)
   //   metrics.write        — ctx.metrics counters + duration histograms
   capabilities: [
     "agent.tools.register",
@@ -85,13 +85,13 @@ const manifest: ManifestWithRuntimeRequirements = {
     worker: "./dist/worker.js",
   },
 
-  // Host-side kernel-sandbox capability negotiation.
+  // 114 §5.2 — host-side kernel-sandbox capability negotiation.
   runtimeRequirements: {
     kernelSandbox: "bubblewrap",
   },
 
-  // Pin the seccomp filter blob digest AND the
-  // python-side loader shim digest (dual pin). The build
+  // 114 acceptance — pin the seccomp filter blob digest AND the
+  // python-side loader shim digest (rev-4 §5.2 dual pin). The build
   // script reads `worker/seccomp_filter.bpf.sha256` (produced by
   // `make -C worker`) and computes sha256 of `worker/seccomp_load.py`,
   // substituting both values at build time. Literals below are
@@ -107,9 +107,9 @@ const manifest: ManifestWithRuntimeRequirements = {
     seccompLoaderSha256: "__PLA114_SECCOMP_LOADER_SHA256__",
   },
 
-  // instanceConfigSchema — ties secret-scope strictly to githubPatSecretId.
-  // Fields validated by the host before plugin load.
-  // additionalProperties:false so unknown keys are rejected at host
+  // instanceConfigSchema — ties secret-scope strictly to githubPatSecretId
+  // (41 remediation #2). Fields validated by the host before plugin load.
+  // 74 F3: additionalProperties:false so unknown keys are rejected at host
   // load time rather than silently ignored (fail-closed).
   instanceConfigSchema: {
     type: "object",
@@ -121,12 +121,25 @@ const manifest: ManifestWithRuntimeRequirements = {
           "Paperclip secret UUID for the GitHub PAT used to push CAD artifacts. " +
           "Create the secret in the board UI and paste its UUID here.",
       },
+      // 1094 separation-of-duties: optional read-only intake token. When
+      // unset, intake falls back to githubPatSecretId (byte-identical to the
+      // pre-1094 shared-PAT behaviour). Declared here because the schema is
+      // additionalProperties:false — an undeclared optional key would be
+      // rejected at host load. NOT in `required`.
+      intakePatSecretId: {
+        type: "string",
+        format: "secret-ref",
+        description:
+          "Optional Paperclip secret UUID for a Contents:Read-only GitHub PAT used " +
+          "ONLY by the inputArtifacts intake-fetch path. Falls back to " +
+          "githubPatSecretId when unset; export always uses githubPatSecretId.",
+      },
       artifactRepoUrl: {
         type: "string",
         description:
           "HTTPS clone URL of the GitHub repository where CAD artifacts are stored. " +
           "Defaults to https://github.com/claudegoogl-sudo/cad-artifacts.git. " +
-          "Operator must pre-create this repo; the plugin is push-only.",
+          "Operator must pre-create this repo; the plugin is push-only (56 AC#2).",
       },
       artifactRepoBranch: {
         type: "string",
@@ -162,6 +175,30 @@ const manifest: ManifestWithRuntimeRequirements = {
               "Execution timeout in seconds (1–300, default: 30). " +
               "Enforced by the CAD worker (sub-goal 2); stub accepts but ignores.",
           },
+          // 1089 Ask 1 — host-mediated scan intake. The host fetches each
+          // repoPath from the cad-artifacts repo with the export PAT and stages
+          // it into the sandbox at inputs/<basename>; the script reads it via
+          // StlAPI_Reader("inputs/<basename>"). Path allowlist (user-uploads/,
+          // artifacts/), per-file 50 MiB + 120 MiB total + max-3 caps enforced
+          // host-side in worker.ts (see cad-intake.ts).
+          inputArtifacts: {
+            type: "array",
+            maxItems: 3,
+            items: {
+              type: "object",
+              properties: {
+                repoPath: {
+                  type: "string",
+                  description:
+                    "Path of an uploaded scan in the cad-artifacts repo (under user-uploads/ or artifacts/).",
+                },
+              },
+              required: ["repoPath"],
+              additionalProperties: false,
+            },
+            description:
+              "Optional scan/mesh files staged into the sandbox before the script runs (1089).",
+          },
         },
         required: ["script"],
         additionalProperties: false,
@@ -185,7 +222,7 @@ const manifest: ManifestWithRuntimeRequirements = {
           },
           format: {
             type: "string",
-            // dxf/svg are 2D vector outputs.
+            // 443 — DR laser-fab ask: dxf/svg are 2D vector outputs.
             // DXF requires the script's `result` be a 2D Workplane (wires/faces);
             // SVG works for both 2D Workplanes and 3D shapes (projected view).
             enum: ["step", "stl", "3mf", "dxf", "svg"],
@@ -193,7 +230,7 @@ const manifest: ManifestWithRuntimeRequirements = {
           },
           paperclipTicketId: {
             type: "string",
-            // Allowlist regex; rejects path traversal and
+            // 74 F1/F2 — allowlist regex; rejects path traversal and
             // commit-message injection at the host's schema-validation gate.
             pattern: "^[A-Z][A-Z0-9]{1,9}-[0-9]{1,9}$",
             description:
@@ -213,7 +250,7 @@ const manifest: ManifestWithRuntimeRequirements = {
           },
         },
         required: ["artifactId", "format", "paperclipTicketId", "toolCallId"],
-        // Fail-closed on unknown fields; matches cad.run_script.
+        // 74 F3 — fail-closed on unknown fields; matches cad.run_script.
         additionalProperties: false,
       },
     },
