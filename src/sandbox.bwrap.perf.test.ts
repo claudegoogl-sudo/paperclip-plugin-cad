@@ -142,9 +142,11 @@ const WORST_ITER_ADDER_CEILING_MS = 400;
  * envelope (a trivial Workplane().box() round-trip is ≈ 600–900 ms on the
  * deploy-host class). Conservative — the gate that matters is the
  * adder-vs-baseline check; this is just to keep the perf suite useful when
- * run on its own.
+ * run on its own. Headroom absorbs shared-runner variance: observed p95
+ * on a quiet runner sits ~1.8 s, while a loaded GitHub Actions runner can
+ * spike ~5–10% above that without any code regression.
  */
-const ABS_P95_CEILING_MS = 2_000;
+const ABS_P95_CEILING_MS = 2_200;
 
 // ---------------------------------------------------------------------------
 // Helpers
