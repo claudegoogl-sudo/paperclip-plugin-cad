@@ -3,7 +3,7 @@
   "version": "0.1.11",
   "type": "module",
   "private": true,
-  "description": "CadQuery plugin for Paperclip — lets agents design and render 3D CAD models via tool calls",
+  "description": "CadQuery plugin for Paperclip \u2014 lets agents design and render 3D CAD models via tool calls",
   "scripts": {
     "build": "node ./esbuild.config.mjs",
     "postbuild": "npm run check:manifest-version",
@@ -65,14 +65,17 @@
   "author": "Platform",
   "license": "MIT",
   "dependencies": {
-    "@paperclipai/plugin-sdk": "2026.428.0"
+    "@paperclipai/plugin-sdk": "file:.paperclip-sdk/paperclipai-plugin-sdk-2026.428.1-fork.9.tgz"
   },
   "devDependencies": {
-    "@paperclipai/shared": "2026.428.0",
+    "@paperclipai/shared": "file:.paperclip-sdk/paperclipai-shared-2026.428.1-fork.9.tgz",
     "@types/node": "24.12.2",
     "esbuild": "0.27.7",
     "tslib": "2.8.1",
     "typescript": "5.9.3",
     "vitest": "3.2.4"
+  },
+  "overrides": {
+    "@paperclipai/shared": "file:.paperclip-sdk/paperclipai-shared-2026.428.1-fork.9.tgz"
   }
 }
