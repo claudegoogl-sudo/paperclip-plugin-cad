@@ -69,7 +69,7 @@ jobs:
         # no compiled seccomp_filter.bpf. Installing cadquery here would
         # duplicate sandbox.yml and add minutes to the fast gate.
         #
-        # The three specs excluded below drive real CadQuery through the
+        # The specs excluded below drive real CadQuery through the
         # worker subprocess, so they would fail rather than skip here. The
         # bwrap and integrity specs stay in the glob and self-skip when the
         # filter blob is absent.
@@ -84,7 +84,8 @@ jobs:
             --exclude 'src/worker.test.ts' \
             --exclude 'src/worker.cad-export.test.ts' \
             --exclude 'src/worker.intake.test.ts' \
-            --exclude 'src/worker.intake-pat-secret.test.ts'
+            --exclude 'src/worker.intake-pat-secret.test.ts' \
+            --exclude 'src/worker.secret-ref-shape.test.ts'
 
       - name: Run manifest-validator regression test
         # Also covered by "Unit tests" above; named separately so the
