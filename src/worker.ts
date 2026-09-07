@@ -35,6 +35,8 @@ import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
 import * as path from "node:path";
 
+import { resolveSecretRef, type SecretRefValue } from "./secretRefBinding.js";
+
 // INTEGRATION SWITCH (sub-goal 2 / 54): real CadQuery sandbox client.
 import {
   renderCadQuery,
@@ -57,11 +59,14 @@ import {
 // ---------------------------------------------------------------------------
 
 interface CadPluginConfig {
-  githubPatSecretId: string;
+  // Secret-ref fields accept BOTH stored shapes (legacy bare-UUID string or
+  // the canonical binding object) — normalized at the resolve seam in
+  // secretRefBinding.ts, so both shapes resolve identically.
+  githubPatSecretId: SecretRefValue;
   // 1094: optional read-only intake PAT. Intake resolves
   // `intakePatSecretId ?? githubPatSecretId`; export always uses
   // githubPatSecretId. Unset → byte-identical shared-PAT behaviour.
-  intakePatSecretId?: string;
+  intakePatSecretId?: SecretRefValue;
   artifactRepoUrl?: string;
   artifactRepoBranch?: string;
 }
@@ -611,7 +616,7 @@ const plugin = definePlugin({
           const repoUrl = config.artifactRepoUrl ?? DEFAULT_ARTIFACT_REPO_URL;
           const branch = config.artifactRepoBranch ?? DEFAULT_ARTIFACT_BRANCH;
           ctx.logger.info("cad.run_script: fetching inputArtifacts", { count: parsedInputs.repoPaths.length, intakePat: config.intakePatSecretId ? "dedicated" : "shared" });
-          const pat = await ctx.secrets.resolve(intakeSecretId);
+          const pat = await resolveSecretRef(ctx.secrets, intakeSecretId);
           try {
             inputFiles = await fetchInputArtifacts(pat, repoUrl, branch, parsedInputs.repoPaths);
           } catch (err) {
@@ -879,7 +884,7 @@ const plugin = definePlugin({
         }
 
         ctx.logger.info("cad.export: resolving GitHub PAT");
-        const pat = await ctx.secrets.resolve(config.githubPatSecretId);
+        const pat = await resolveSecretRef(ctx.secrets, config.githubPatSecretId);
 
         try {
           await checkRepoPrerequisite(pat, repoUrl);

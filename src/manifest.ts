@@ -114,25 +114,86 @@ const manifest: ManifestWithRuntimeRequirements = {
   instanceConfigSchema: {
     type: "object",
     properties: {
+      // Secret-ref fields accept BOTH stored shapes: the legacy bare secret
+      // UUID string (existing rows keep loading for operator display) and the
+      // canonical { type: "secret_ref", secretId, version? } binding object
+      // (the shape new config writes use). The worker normalizes both to the
+      // same binding before resolve — see src/secretRefBinding.ts.
+      //
+      // DISCOVERY INVARIANT: the host's secret-ref collector keys on
+      // `format: "secret-ref"` sitting DIRECTLY on the property schema (its
+      // walker checks the property node's own `format`, then recurses into
+      // oneOf/anyOf/allOf branches — a branch's own `format` is never read as
+      // a property). Wrapping the union in a bare `oneOf` without the
+      // property-level `format` therefore silently hides the field from
+      // host-side binding sync. Keep `format` on this node.
       githubPatSecretId: {
-        type: "string",
         format: "secret-ref",
         description:
-          "Paperclip secret UUID for the GitHub PAT used to push CAD artifacts. " +
-          "Create the secret in the board UI and paste its UUID here.",
+          "Paperclip secret for the GitHub PAT used to push CAD artifacts. " +
+          "Either the secret UUID string or a { type: \"secret_ref\", secretId, version? } object.",
+        oneOf: [
+          {
+            type: "string",
+            format: "secret-ref",
+            description: "Legacy shape: bare secret UUID.",
+          },
+          {
+            type: "object",
+            properties: {
+              type: { const: "secret_ref" },
+              secretId: {
+                type: "string",
+                format: "uuid",
+                description: "Paperclip secret UUID.",
+              },
+              version: {
+                oneOf: [{ const: "latest" }, { type: "integer", minimum: 1 }],
+                description: "Optional secret version selector. Defaults to latest.",
+              },
+            },
+            required: ["type", "secretId"],
+            additionalProperties: false,
+          },
+        ],
       },
-      // 1094 separation-of-duties: optional read-only intake token. When
+      // Separation-of-duties: optional read-only intake token. When
       // unset, intake falls back to githubPatSecretId (byte-identical to the
       // pre-1094 shared-PAT behaviour). Declared here because the schema is
       // additionalProperties:false — an undeclared optional key would be
-      // rejected at host load. NOT in `required`.
+      // rejected at host load. NOT in `required`. Same dual-shape +
+      // discovery invariant as githubPatSecretId above.
       intakePatSecretId: {
-        type: "string",
         format: "secret-ref",
         description:
-          "Optional Paperclip secret UUID for a Contents:Read-only GitHub PAT used " +
+          "Optional Paperclip secret for a Contents:Read-only GitHub PAT used " +
           "ONLY by the inputArtifacts intake-fetch path. Falls back to " +
-          "githubPatSecretId when unset; export always uses githubPatSecretId.",
+          "githubPatSecretId when unset; export always uses githubPatSecretId. " +
+          "Either the secret UUID string or a { type: \"secret_ref\", secretId, version? } object.",
+        oneOf: [
+          {
+            type: "string",
+            format: "secret-ref",
+            description: "Legacy shape: bare secret UUID.",
+          },
+          {
+            type: "object",
+            properties: {
+              type: { const: "secret_ref" },
+              secretId: {
+                type: "string",
+                format: "uuid",
+                description: "Paperclip secret UUID.",
+              },
+              version: {
+                oneOf: [{ const: "latest" }, { type: "integer", minimum: 1 }],
+                description: "Optional secret version selector. Defaults to latest.",
+              },
+            },
+            required: ["type", "secretId"],
+            additionalProperties: false,
+          },
+        ],
       },
       artifactRepoUrl: {
         type: "string",

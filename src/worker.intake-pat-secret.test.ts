@@ -28,7 +28,7 @@ const BOX_SCRIPT = "import cadquery as cq\nresult = cq.Workplane('XY').box(1, 1,
 
 function buildMockCtx(config: Record<string, unknown>) {
   const handlers: Record<string, ToolHandler> = {};
-  const resolve = vi.fn(async (id: string) => `pat-for:${id}`);
+  const resolve = vi.fn(async (_binding: unknown) => "pat-fake");
   const ctx = {
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     metrics: { write: vi.fn(async () => {}) },
@@ -75,8 +75,8 @@ afterEach(() => {
 describe("TEST-1094 intake PAT separation of duties", () => {
   it("AC3: intake resolves intakePatSecretId when it is set", async () => {
     const { handlers, resolve } = await bootWorker({
-      githubPatSecretId: "export-secret",
-      intakePatSecretId: "intake-ro-secret",
+      githubPatSecretId: "679b5cb9-079e-45a2-9423-c1720172131a",
+      intakePatSecretId: "0f0e8d8c-7b6a-4988-8776-655443322211",
     });
     mockIntake404();
 
@@ -86,12 +86,12 @@ describe("TEST-1094 intake PAT separation of duties", () => {
     );
 
     expect(resolve).toHaveBeenCalledTimes(1);
-    expect(resolve).toHaveBeenCalledWith("intake-ro-secret");
-    expect(resolve).not.toHaveBeenCalledWith("export-secret");
+    expect(resolve).toHaveBeenCalledWith({ type: "secret_ref", secretId: "0f0e8d8c-7b6a-4988-8776-655443322211", version: "latest" });
+    expect(resolve).not.toHaveBeenCalledWith({ type: "secret_ref", secretId: "679b5cb9-079e-45a2-9423-c1720172131a", version: "latest" });
   });
 
   it("AC4: intake falls back to githubPatSecretId when intakePatSecretId is unset (back-compat)", async () => {
-    const { handlers, resolve } = await bootWorker({ githubPatSecretId: "shared-secret" });
+    const { handlers, resolve } = await bootWorker({ githubPatSecretId: "679b5cb9-079e-45a2-9423-c1720172131a" });
     mockIntake404();
 
     await handlers["cad.run_script"](
@@ -100,13 +100,13 @@ describe("TEST-1094 intake PAT separation of duties", () => {
     );
 
     expect(resolve).toHaveBeenCalledTimes(1);
-    expect(resolve).toHaveBeenCalledWith("shared-secret");
+    expect(resolve).toHaveBeenCalledWith({ type: "secret_ref", secretId: "679b5cb9-079e-45a2-9423-c1720172131a", version: "latest" });
   });
 
   it("AC6: export always resolves githubPatSecretId, even when intakePatSecretId is set", async () => {
     const { handlers, resolve } = await bootWorker({
-      githubPatSecretId: "export-secret",
-      intakePatSecretId: "intake-ro-secret",
+      githubPatSecretId: "679b5cb9-079e-45a2-9423-c1720172131a",
+      intakePatSecretId: "0f0e8d8c-7b6a-4988-8776-655443322211",
     });
 
     // Stage a real artifact (no inputArtifacts → no intake resolve).
@@ -128,7 +128,7 @@ describe("TEST-1094 intake PAT separation of duties", () => {
     );
 
     expect(resolve).toHaveBeenCalledTimes(1);
-    expect(resolve).toHaveBeenCalledWith("export-secret");
-    expect(resolve).not.toHaveBeenCalledWith("intake-ro-secret");
+    expect(resolve).toHaveBeenCalledWith({ type: "secret_ref", secretId: "679b5cb9-079e-45a2-9423-c1720172131a", version: "latest" });
+    expect(resolve).not.toHaveBeenCalledWith({ type: "secret_ref", secretId: "0f0e8d8c-7b6a-4988-8776-655443322211", version: "latest" });
   }, 60_000);
 });
