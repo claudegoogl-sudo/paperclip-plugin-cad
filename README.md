@@ -8,7 +8,8 @@ Install the plugin from the Paperclip board:
 
 1. Go to **Plugins → Install plugin** and search for `platform.cad`, or upload this package directly.
 2. Create a Paperclip secret for your GitHub Personal Access Token (PAT) with `repo` scope.
-3. In the plugin instance config, set `githubPatSecretId` to the UUID of that secret.
+3. In the plugin instance config, set `githubPatSecretId` to that secret (see
+   [Secret references](#secret-references) for the accepted config shapes).
 
 The plugin registers two tools on every agent it is enabled for: `cad.run_script` and `cad.export`.
 
@@ -58,6 +59,20 @@ Tool call: cad.export
     "artifactPath": "artifacts/PLA-32/tc-1234/artifact.step"
   }
 ```
+
+## Secret references
+
+The `githubPatSecretId` (required) and `intakePatSecretId` (optional) config
+fields accept both of these shapes:
+
+| Shape | Example | Notes |
+| --- | --- | --- |
+| Binding object (recommended for new writes) | `{ "type": "secret_ref", "secretId": "<uuid>", "version": "latest" }` | The shape the board's config editor writes; `version` is optional (`"latest"` or a positive integer). |
+| Legacy UUID string | `"<uuid>"` | Still accepted for stored rows; the worker normalizes it to the binding object at resolve time. |
+
+Both shapes resolve identically — the worker converts either one to the same
+canonical binding before calling `ctx.secrets.resolve`, so switching a stored
+value between the shapes does not change which secret is used.
 
 ## Security defaults
 

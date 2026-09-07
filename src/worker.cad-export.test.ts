@@ -40,7 +40,7 @@ const DEFAULT_RUN_CTX = {
 
 function buildMockCtx(
   pat = "ghp_fake_token_pla56",
-  config: Record<string, unknown> = { githubPatSecretId: "secret-uuid-pla56" },
+  config: Record<string, unknown> = { githubPatSecretId: "679b5cb9-079e-45a2-9423-c1720172131a" },
 ) {
   const handlers: Record<string, ToolHandler> = {};
   const ctx = {
@@ -295,7 +295,7 @@ describe("cad.export 56 pipeline", () => {
   it("AC6: uses config.artifactRepoUrl when set", async () => {
     vi.resetModules();
     const { ctx: customCtx, handlers } = buildMockCtx("ghp_custom", {
-      githubPatSecretId: "secret-custom",
+      githubPatSecretId: "679b5cb9-079e-45a2-9423-c1720172131a",
       artifactRepoUrl: "https://github.com/my-org/my-artifacts.git",
     });
     vi.stubGlobal("fetch", vi.fn());
@@ -661,7 +661,7 @@ describe("cad.export 74 F4 — strict URL parsing", () => {
   it("F4: rejects http:// (non-https) artifactRepoUrl with prerequisite_missing", { timeout: 15000 }, async () => {
     vi.resetModules();
     const { ctx: customCtx, handlers } = buildMockCtx("ghp_x", {
-      githubPatSecretId: "secret-x",
+      githubPatSecretId: "679b5cb9-079e-45a2-9423-c1720172131a",
       artifactRepoUrl: "http://github.com/o/r.git",
     });
     vi.stubGlobal("fetch", vi.fn());
@@ -684,7 +684,7 @@ describe("cad.export 74 F4 — strict URL parsing", () => {
   it("F4: rejects attacker URL whose path contains 'github.com/o/r.git'", { timeout: 15000 }, async () => {
     vi.resetModules();
     const { ctx: customCtx, handlers } = buildMockCtx("ghp_x", {
-      githubPatSecretId: "secret-x",
+      githubPatSecretId: "679b5cb9-079e-45a2-9423-c1720172131a",
       artifactRepoUrl: "https://attacker.example/path/github.com/o/r.git",
     });
     vi.stubGlobal("fetch", vi.fn());
