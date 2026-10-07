@@ -98,7 +98,7 @@ function buildMockCtx() {
         handlers[name] = handler;
       }),
     },
-    config: { get: vi.fn().mockResolvedValue({ githubPatSecretId: "secret-uuid" }) },
+    config: { get: vi.fn().mockResolvedValue({ githubPatSecretId: "679b5cb9-079e-45a2-9423-c1720172131a" }) },
     secrets: { resolve: vi.fn().mockResolvedValue("ghp_fake") },
   };
   return { ctx, handlers };
