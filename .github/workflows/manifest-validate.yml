@@ -20,6 +20,7 @@ on:
       - 'scripts/validate-manifest.mjs'
       - 'scripts/check-manifest-version.mjs'
       - 'scripts/check-source-hygiene.mjs'
+      - 'scripts/check-worker-self-contained.mjs'
       - 'tsconfig.json'
       - 'vitest.config.ts'
       - '.github/workflows/manifest-validate.yml'
@@ -34,6 +35,7 @@ on:
       - 'scripts/validate-manifest.mjs'
       - 'scripts/check-manifest-version.mjs'
       - 'scripts/check-source-hygiene.mjs'
+      - 'scripts/check-worker-self-contained.mjs'
       - 'tsconfig.json'
       - 'vitest.config.ts'
       - '.github/workflows/manifest-validate.yml'
@@ -63,6 +65,12 @@ jobs:
 
       - name: Build manifest (and worker)
         run: npm run build
+
+      - name: Assert dist/worker.js has no bare non-builtin imports
+        # The host installs the extracted package as-is (no npm install, no
+        # node_modules). A bare import such as "@paperclipai/plugin-sdk" in
+        # the worker bundle dies on activation with ERR_MODULE_NOT_FOUND.
+        run: npm run check:worker-self-contained
 
       - name: Unit tests (specs that need no CAD toolchain)
         # This runner deliberately stays cheap: plain npm, no cadquery and

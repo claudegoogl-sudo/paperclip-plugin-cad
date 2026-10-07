@@ -4,6 +4,29 @@ Tracker: [PLA-32](/PLA/issues/PLA-32)
 
 ---
 
+## v0.1.14 — 2026-10-07
+
+### Fixed
+
+- **Worker bundle runs standalone again.** `esbuild.config.mjs` builds the
+  manifest and the worker as two separate entries. The worker entry no longer
+  sets `packages: "external"`, so `@paperclipai/plugin-sdk` (vendored
+  2026.428.0, unchanged) is bundled into `dist/worker.js`. Node builtins stay
+  external because the platform is `node`. Before this fix, v0.1.13
+  `dist/worker.js` had a bare `@paperclipai/plugin-sdk` import and died on
+  activation with `ERR_MODULE_NOT_FOUND`, because the host installs the
+  extracted package without `node_modules`. `dist/manifest.js` is built as
+  before (only the injected version changes).
+
+### Added
+
+- `scripts/check-worker-self-contained.mjs` (`npm run
+  check:worker-self-contained`) fails if `dist/worker.js` has any bare import
+  of a non-builtin package. It runs as a step in the fast
+  `manifest-validate.yml` job.
+
+---
+
 ## Unreleased
 
 ### Added
