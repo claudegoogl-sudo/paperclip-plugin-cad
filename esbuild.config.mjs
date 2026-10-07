@@ -70,7 +70,6 @@ const sharedOptions = {
   platform: "node",
   target: "node20",
   format: "esm",
-  packages: "external",
   sourcemap: "external",
   define: versionDefine,
   minifyWhitespace: true,
@@ -116,22 +115,40 @@ function computeSeccompLoaderSha256() {
   return createHash("sha256").update(buf).digest("hex");
 }
 
+// Manifest entry: src/manifest.ts imports the SDK type-only, so the
+// emitted dist/manifest.js has no runtime SDK import. Keep
+// `packages: "external"` here so the manifest output does not change.
+const manifestOptions = {
+  ...sharedOptions,
+  packages: "external",
+  entryPoints: { manifest: "src/manifest.ts" },
+  outdir: "dist",
+};
+
+// Worker entry: bundle @paperclipai/plugin-sdk (and its transitive deps)
+// INTO dist/worker.js. The host registers the extracted package directory
+// as-is and does not run `npm install`, so a bare import of the SDK dies on
+// activation with ERR_MODULE_NOT_FOUND. Node builtins stay external
+// automatically because platform is "node". The
+// `check:worker-self-contained` gate fails CI if this is undone.
+const workerOptions = {
+  ...sharedOptions,
+  entryPoints: { worker: "src/worker.ts" },
+  outdir: "dist",
+};
+
 async function build() {
-  const ctx = await esbuild.context({
-    ...sharedOptions,
-    entryPoints: {
-      manifest: "src/manifest.ts",
-      worker: "src/worker.ts",
-    },
-    outdir: "dist",
-  });
+  const ctxs = await Promise.all([
+    esbuild.context(manifestOptions),
+    esbuild.context(workerOptions),
+  ]);
 
   if (watch) {
-    await ctx.watch();
+    await Promise.all(ctxs.map((c) => c.watch()));
     console.log("Watching for changes...");
   } else {
-    await ctx.rebuild();
-    await ctx.dispose();
+    await Promise.all(ctxs.map((c) => c.rebuild()));
+    await Promise.all(ctxs.map((c) => c.dispose()));
 
     // PLA-114: substitute the seccomp filter digest AND the loader-shim
     // digest into the bundled manifest (and into sidecars) so the host's
