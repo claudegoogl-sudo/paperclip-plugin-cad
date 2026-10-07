@@ -25,11 +25,15 @@ const isRelative = (spec) =>
 
 // Static `import ... from "x"`, `export ... from "x"`, side-effect
 // `import "x"`, dynamic `import("x")` and `require("x")`.
+// The keyword must not sit inside a string or follow a property dot: the
+// bundled shared constants contain literals such as "company.import", which
+// would otherwise parse as a side-effect import of the next string.
+const kw = String.raw`(?<![.\w$"'\x60])`;
 const patterns = [
-  /\b(?:import|export)\b[^;"'`]*?\bfrom\s*["']([^"']+)["']/g,
-  /\bimport\s*["']([^"']+)["']/g,
-  /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,
-  /\brequire\s*\(\s*["']([^"']+)["']\s*\)/g,
+  new RegExp(kw + String.raw`(?:import|export)\b[^;"'\x60]*?\bfrom\s*["']([^"']+)["']`, "g"),
+  new RegExp(kw + String.raw`import\s*["']([^"']+)["']`, "g"),
+  new RegExp(kw + String.raw`import\s*\(\s*["']([^"']+)["']\s*\)`, "g"),
+  new RegExp(kw + String.raw`require\s*\(\s*["']([^"']+)["']\s*\)`, "g"),
 ];
 
 const specs = new Set();

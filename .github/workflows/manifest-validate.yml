@@ -21,6 +21,8 @@ on:
       - 'scripts/check-manifest-version.mjs'
       - 'scripts/check-source-hygiene.mjs'
       - 'scripts/check-worker-self-contained.mjs'
+      - 'scripts/check-invocation-echo.mjs'
+      - '.paperclip-sdk/**'
       - 'tsconfig.json'
       - 'vitest.config.ts'
       - '.github/workflows/manifest-validate.yml'
@@ -36,6 +38,8 @@ on:
       - 'scripts/check-manifest-version.mjs'
       - 'scripts/check-source-hygiene.mjs'
       - 'scripts/check-worker-self-contained.mjs'
+      - 'scripts/check-invocation-echo.mjs'
+      - '.paperclip-sdk/**'
       - 'tsconfig.json'
       - 'vitest.config.ts'
       - '.github/workflows/manifest-validate.yml'
@@ -71,6 +75,11 @@ jobs:
         # node_modules). A bare import such as "@paperclipai/plugin-sdk" in
         # the worker bundle dies on activation with ERR_MODULE_NOT_FOUND.
         run: npm run check:worker-self-contained
+
+      - name: Assert dist/worker.js echoes the invocation id it declares
+        # A worker that declares echoesInvocationId but never sends
+        # paperclipInvocationId gets every in-dispatch host call rejected.
+        run: npm run check:invocation-echo
 
       - name: Unit tests (specs that need no CAD toolchain)
         # This runner deliberately stays cheap: plain npm, no cadquery and

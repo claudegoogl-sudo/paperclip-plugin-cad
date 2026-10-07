@@ -4,6 +4,36 @@ Tracker: [PLA-32](/PLA/issues/PLA-32)
 
 ---
 
+## v0.1.15 — 2026-10-07
+
+### Fixed
+
+- **In-dispatch host calls work again.** The vendored plugin SDK moves from
+  2026.428.0 to 2026.924.1-fork51.2 (`@paperclipai/plugin-sdk` and
+  `@paperclipai/shared`). The old SDK declared `echoesInvocationId` at
+  initialize but never sent `paperclipInvocationId` on worker->host calls.
+  The host trusts the declaration, so in v0.1.14 every `config.get` /
+  `secrets.resolve` inside a tool call (`cad.export`, `cad.run_script` with
+  `inputArtifacts`) was rejected with -32005 ("missing, expired, or unknown
+  invocation scope"). The new SDK echoes the id. Capabilities and tools are
+  unchanged.
+- `resolveSecretRef` no longer needs a cast: the new SDK types
+  `secrets.resolve` as `string | EnvSecretRefBinding`. Behaviour unchanged.
+- `check-worker-self-contained` no longer treats string literals such as
+  `"company.import"` (bundled from the new shared package) as imports.
+
+### Added
+
+- `scripts/check-invocation-echo.mjs` (`npm run check:invocation-echo`), a
+  fast-gate step: fails if `dist/worker.js` declares `echoesInvocationId`
+  but contains no `paperclipInvocationId`.
+- `src/worker.invocation-echo.test.ts`: spawns the built `dist/worker.js`
+  against a stub host that rejects calls without the active invocation id,
+  dispatches `cad.run_script` with `inputArtifacts`, and asserts that
+  `config.get` and `secrets.resolve` carry the id.
+
+---
+
 ## v0.1.14 — 2026-10-07
 
 ### Fixed

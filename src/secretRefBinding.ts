@@ -8,12 +8,10 @@
  * string, while new operator writes use the binding object (the manifest
  * schema accepts both — see instanceConfigSchema in manifest.ts).
  *
- * The vendored plugin SDK is pinned at 2026.428.0, whose
- * `PluginSecretsClient.resolve` types only the legacy string (the pin is
- * deliberate — see the SDK-vendoring commit). The host forwards the resolve
- * argument verbatim to the resolver, so the binding object round-trips
- * correctly; the single cast below is the pinned-SDK type seam and must
- * stay in this one place.
+ * The vendored plugin SDK (2026.924.1-fork51.2) types
+ * `PluginSecretsClient.resolve` as `string | EnvSecretRefBinding`, so the
+ * binding object is passed without a cast. The host forwards the resolve
+ * argument verbatim to the resolver.
  */
 
 /** Canonical binding object accepted by the host's resolve path. */
@@ -79,9 +77,8 @@ export function toSecretRefBinding(value: SecretRefValue): SecretRefBinding {
  * identically (no double-wrap of an object-shaped stored value).
  */
 export function resolveSecretRef(
-  secrets: { resolve: (secretRef: string) => Promise<string> },
+  secrets: { resolve: (secretRef: string | SecretRefBinding) => Promise<string> },
   value: SecretRefValue,
 ): Promise<string> {
-  const resolveBinding = secrets.resolve as unknown as (binding: SecretRefBinding) => Promise<string>;
-  return resolveBinding(toSecretRefBinding(value));
+  return secrets.resolve(toSecretRefBinding(value));
 }
