@@ -1,6 +1,6 @@
 {
   "name": "@platform/paperclip-plugin-cad",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "type": "module",
   "private": true,
   "description": "CadQuery plugin for Paperclip \u2014 lets agents design and render 3D CAD models via tool calls",
@@ -14,6 +14,7 @@
     "check:source-hygiene": "node ./scripts/check-source-hygiene.mjs",
     "check:manifest-version": "node ./scripts/check-manifest-version.mjs",
     "check:worker-self-contained": "node ./scripts/check-worker-self-contained.mjs",
+    "check:invocation-echo": "node ./scripts/check-invocation-echo.mjs",
     "check:release-tarball": "node ./scripts/check-release-tarball.mjs --keep",
     "check:release-tarball:self-test": "node ./scripts/check-release-tarball.mjs --self-test",
     "check:drift": "node ./scripts/check-live-drift.mjs",
@@ -44,6 +45,7 @@
     "scripts/check-manifest-version.mjs",
     "scripts/check-release-tarball.mjs",
     "scripts/check-worker-self-contained.mjs",
+    "scripts/check-invocation-echo.mjs",
     "esbuild.config.mjs",
     "tsconfig.json",
     "vitest.config.ts",
@@ -67,10 +69,10 @@
   "author": "Platform",
   "license": "MIT",
   "dependencies": {
-    "@paperclipai/plugin-sdk": "file:.paperclip-sdk/paperclipai-plugin-sdk-2026.428.0.tgz"
+    "@paperclipai/plugin-sdk": "file:.paperclip-sdk/paperclipai-plugin-sdk-2026.924.1-fork51.2.tgz"
   },
   "devDependencies": {
-    "@paperclipai/shared": "file:.paperclip-sdk/paperclipai-shared-2026.428.0.tgz",
+    "@paperclipai/shared": "file:.paperclip-sdk/paperclipai-shared-2026.924.1-fork51.2.tgz",
     "@types/node": "24.12.2",
     "esbuild": "0.27.7",
     "tslib": "2.8.1",
@@ -78,6 +80,6 @@
     "vitest": "3.2.4"
   },
   "overrides": {
-    "@paperclipai/shared": "file:.paperclip-sdk/paperclipai-shared-2026.428.0.tgz"
+    "@paperclipai/shared": "file:.paperclip-sdk/paperclipai-shared-2026.924.1-fork51.2.tgz"
   }
 }
