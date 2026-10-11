@@ -59,9 +59,9 @@ function fakeResponse(opts: {
 
 describe("assertSafeIntakePath", () => {
   it("accepts allowlisted file paths within the caller's tenant", () => {
-    expect(assertSafeIntakePath("user-uploads/scan.stl", CO)).toBeNull();
+    expect(assertSafeIntakePath(`user-uploads/${CO}/scan.stl`, CO)).toBeNull();
     expect(assertSafeIntakePath(`artifacts/${CO}/call-1/out.3mf`, CO)).toBeNull();
-    expect(assertSafeIntakePath("user-uploads/sub/dir/mesh.ply", CO)).toBeNull();
+    expect(assertSafeIntakePath(`user-uploads/${CO}/sub/dir/mesh.ply`, CO)).toBeNull();
   });
 
   it("rejects traversal, absolute, and out-of-allowlist paths", () => {
@@ -122,9 +122,20 @@ describe("assertSafeIntakePath — 1099 SE-1 per-tenant scoping", () => {
     expect(assertSafeIntakePath(`artifacts/${CO}/x.stl`, "bad/slash")).not.toBeNull();
   });
 
-  it("leaves user-uploads/ unscoped by default (Phase 2 gated off)", () => {
-    expect(assertSafeIntakePath("user-uploads/scan.stl", CO)).toBeNull();
-    expect(assertSafeIntakePath("user-uploads/anyones/scan.stl", CO)).toBeNull();
+  it("scopes user-uploads/ to the tenant by default (Phase 2 on)", () => {
+    // AC1: own prefix allowed with no opts
+    expect(assertSafeIntakePath(`user-uploads/${CO}/scan.stl`, CO)).toBeNull();
+    // AC2: flat path refused, error names the required form
+    const flat = assertSafeIntakePath("user-uploads/scan.stl", CO);
+    expect(flat).toMatch(/user-uploads\/<yourCompanyId>\/<file>/);
+    // AC3: other tenant refused, error does not echo any id but the caller's own + what was sent
+    const cross = assertSafeIntakePath("user-uploads/company-B/scan.stl", CO);
+    expect(cross).toMatch(/blocked/);
+    expect(assertSafeIntakePath("user-uploads/anyones/scan.stl", CO)).not.toBeNull();
+  });
+
+  it("test-only override can still disable Phase 2 scoping", () => {
+    expect(assertSafeIntakePath("user-uploads/scan.stl", CO, { enforceUserUploadsScoping: false })).toBeNull();
   });
 
   it("when Phase 2 enforcement is enabled, scopes user-uploads/ to the tenant too", () => {
@@ -132,7 +143,7 @@ describe("assertSafeIntakePath — 1099 SE-1 per-tenant scoping", () => {
     expect(assertSafeIntakePath(`user-uploads/${CO}/scan.stl`, CO, opts)).toBeNull();
     const err = assertSafeIntakePath("user-uploads/company-B/scan.stl", CO, opts);
     expect(err).not.toBeNull();
-    expect(err).toMatch(/tenant subtree/);
+    expect(err).toMatch(/cross-tenant paths are blocked/);
     expect(assertSafeIntakePath("user-uploads/scan.stl", CO, opts)).not.toBeNull();
   });
 });
@@ -161,29 +172,29 @@ describe("parseInputArtifacts", () => {
 
   it("accepts a valid list within the caller's tenant", () => {
     const r = parseInputArtifacts(
-      [{ repoPath: "user-uploads/a.stl" }, { repoPath: `artifacts/${CO}/b.stl` }],
+      [{ repoPath: `user-uploads/${CO}/a.stl` }, { repoPath: `artifacts/${CO}/b.stl` }],
       CO,
     );
-    expect(r).toEqual({ repoPaths: ["user-uploads/a.stl", `artifacts/${CO}/b.stl`] });
+    expect(r).toEqual({ repoPaths: [`user-uploads/${CO}/a.stl`, `artifacts/${CO}/b.stl`] });
   });
 
   it("rejects a list containing another tenant's artifacts/ path", () => {
     const r = parseInputArtifacts(
-      [{ repoPath: "user-uploads/a.stl" }, { repoPath: "artifacts/company-B/b.stl" }],
+      [{ repoPath: `user-uploads/${CO}/a.stl` }, { repoPath: "artifacts/company-B/b.stl" }],
       CO,
     );
     expect("error" in r).toBe(true);
   });
 
   it("rejects over the count cap", () => {
-    const many = Array.from({ length: MAX_INPUT_FILES + 1 }, (_, i) => ({ repoPath: `user-uploads/f${i}.stl` }));
+    const many = Array.from({ length: MAX_INPUT_FILES + 1 }, (_, i) => ({ repoPath: `user-uploads/${CO}/f${i}.stl` }));
     expect("error" in parseInputArtifacts(many, CO)).toBe(true);
   });
 
   it("rejects non-array, bad item shape, and extra keys", () => {
     expect("error" in parseInputArtifacts("nope", CO)).toBe(true);
     expect("error" in parseInputArtifacts([42], CO)).toBe(true);
-    expect("error" in parseInputArtifacts([{ repoPath: "user-uploads/a.stl", extra: 1 }], CO)).toBe(true);
+    expect("error" in parseInputArtifacts([{ repoPath: `user-uploads/${CO}/a.stl`, extra: 1 }], CO)).toBe(true);
   });
 
   it("propagates the path allowlist error", () => {
@@ -193,7 +204,7 @@ describe("parseInputArtifacts", () => {
 
   it("rejects duplicate basenames that would clobber", () => {
     const r = parseInputArtifacts(
-      [{ repoPath: "user-uploads/a.stl" }, { repoPath: `artifacts/${CO}/a.stl` }],
+      [{ repoPath: `user-uploads/${CO}/a.stl` }, { repoPath: `artifacts/${CO}/a.stl` }],
       CO,
     );
     expect("error" in r).toBe(true);

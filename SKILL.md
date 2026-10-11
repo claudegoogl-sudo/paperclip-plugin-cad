@@ -39,6 +39,35 @@ Execute a CadQuery Python script string in an isolated subprocess. Returns a sta
 }
 ```
 
+
+#### Input files (`inputArtifacts`) — tenant-scoped paths
+
+`cad.run_script` can stage files from the artifacts repo into `inputs/<basename>`
+via `inputArtifacts: [{ "repoPath": "..." }]`. Every `repoPath` must sit inside
+the calling company's own subtree:
+
+| Prefix | Required form | Since |
+|---|---|---|
+| `artifacts/` | `artifacts/<yourCompanyId>/<...>/<file>` | 0.1.9 |
+| `user-uploads/` | `user-uploads/<yourCompanyId>/<file>` | **0.1.16 (breaking)** |
+
+**Breaking change in 0.1.16:** flat `user-uploads/<file>` paths and paths under
+another company's prefix are refused with `validation_error` *before* any
+GitHub fetch. Move uploads to `user-uploads/<yourCompanyId>/<file>`.
+
+Happy-path example (company id `11111111-1111-4111-8111-111111111111`):
+
+```json
+{
+  "script": "import cadquery as cq\nfrom OCP.StlAPI import StlAPI_Reader\n...",
+  "inputArtifacts": [
+    { "repoPath": "user-uploads/11111111-1111-4111-8111-111111111111/scan.stl" }
+  ]
+}
+```
+
+The script then reads `inputs/scan.stl`.
+
 #### Output
 
 ```json

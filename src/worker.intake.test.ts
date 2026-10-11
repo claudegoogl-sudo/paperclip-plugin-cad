@@ -96,7 +96,7 @@ describe("cad.run_script intake-fetch (1089 Ask 1)", () => {
     fetchMock.mockResolvedValueOnce(rawResponse(makeBinaryStl()));
 
     const result = (await cadRunScript(
-      { script: READ_SCAN_SCRIPT, inputArtifacts: [{ repoPath: "user-uploads/scan.stl" }] },
+      { script: READ_SCAN_SCRIPT, inputArtifacts: [{ repoPath: "user-uploads/company-A/scan.stl" }] },
       DEFAULT_RUN_CTX,
     )) as { data?: { artifactId?: string }; error?: string };
 
@@ -104,7 +104,7 @@ describe("cad.run_script intake-fetch (1089 Ask 1)", () => {
 
     // Confirm the fetch used the raw media type against the contents endpoint.
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(String(url)).toContain("/contents/user-uploads/scan.stl");
+    expect(String(url)).toContain("/contents/user-uploads/company-A/scan.stl");
     expect((init.headers as Record<string, string>)["Accept"]).toBe("application/vnd.github.raw");
   }, 60_000);
 
@@ -119,6 +119,21 @@ describe("cad.run_script intake-fetch (1089 Ask 1)", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["flat path", "user-uploads/scan.stl"],
+    ["cross-tenant path", "user-uploads/company-B/scan.stl"],
+  ])("refuses a %s under user-uploads/ before any GitHub fetch (Phase 2 default on)", async (_label, repoPath) => {
+    const fetchMock = vi.mocked(globalThis.fetch);
+    fetchMock.mockReset();
+    const result = (await cadRunScript(
+      { script: READ_SCAN_SCRIPT, inputArtifacts: [{ repoPath }] },
+      DEFAULT_RUN_CTX,
+    )) as { error?: string; message?: string };
+    expect(result.error).toBe("validation_error");
+    expect(JSON.stringify(result)).toContain("user-uploads/<yourCompanyId>/<file>");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("surfaces a 404 from GitHub as a structured not_found tool error", async () => {
     const fetchMock = vi.mocked(globalThis.fetch);
     fetchMock.mockReset();
@@ -129,7 +144,7 @@ describe("cad.run_script intake-fetch (1089 Ask 1)", () => {
       arrayBuffer: async () => new ArrayBuffer(0),
     } as unknown as Response);
     const result = (await cadRunScript(
-      { script: READ_SCAN_SCRIPT, inputArtifacts: [{ repoPath: "user-uploads/missing.stl" }] },
+      { script: READ_SCAN_SCRIPT, inputArtifacts: [{ repoPath: "user-uploads/company-A/missing.stl" }] },
       DEFAULT_RUN_CTX,
     )) as { data?: { error?: string } };
     expect(result.data?.error).toBe("not_found");

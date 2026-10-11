@@ -4,6 +4,18 @@ Tracker: [PLA-32](/PLA/issues/PLA-32)
 
 ---
 
+## v0.1.16 — 2026-10-11
+
+### Changed (BREAKING for flat-path callers)
+
+- **`user-uploads/` reads are tenant-scoped by default.**
+  `ENFORCE_USER_UPLOADS_TENANT_SCOPING` is now `true`. `inputArtifacts`
+  entries under `user-uploads/` must use `user-uploads/<yourCompanyId>/<file>`.
+  Flat `user-uploads/<file>` paths and other companies' prefixes are refused
+  with `validation_error` before any GitHub fetch. The error names the required
+  form. `artifacts/<companyId>/` scoping (Phase 1) is unchanged.
+- Example: `{"inputArtifacts":[{"repoPath":"user-uploads/<yourCompanyId>/scan.stl"}]}`.
+
 ## v0.1.15 — 2026-10-07
 
 ### Fixed

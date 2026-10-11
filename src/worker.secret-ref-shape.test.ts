@@ -107,7 +107,7 @@ describe("secret-ref config shape → resolve seam", () => {
     const { handlers, resolve } = await bootWorker({ githubPatSecretId: EXPORT_PAT_UUID });
     const runScript = handlers["cad.run_script"];
     await runScript(
-      { script: "pass", inputArtifacts: [{ repoPath: "user-uploads/scan.stl" }] },
+      { script: "pass", inputArtifacts: [{ repoPath: "user-uploads/company-A/scan.stl" }] },
       DEFAULT_RUN_CTX,
     );
     expect(resolve).toHaveBeenCalledTimes(1);
@@ -121,7 +121,7 @@ describe("secret-ref config shape → resolve seam", () => {
     });
     const runScript = handlers["cad.run_script"];
     await runScript(
-      { script: "pass", inputArtifacts: [{ repoPath: "user-uploads/scan.stl" }] },
+      { script: "pass", inputArtifacts: [{ repoPath: "user-uploads/company-A/scan.stl" }] },
       DEFAULT_RUN_CTX,
     );
     expect(resolve).toHaveBeenCalledTimes(1);
@@ -138,7 +138,7 @@ describe("secret-ref config shape → resolve seam", () => {
     // intake resolve happens first (run_script with inputArtifacts)…
     const runScript = handlers["cad.run_script"];
     await runScript(
-      { script: "pass", inputArtifacts: [{ repoPath: "user-uploads/scan.stl" }] },
+      { script: "pass", inputArtifacts: [{ repoPath: "user-uploads/company-A/scan.stl" }] },
       DEFAULT_RUN_CTX,
     );
     expect(resolve).toHaveBeenNthCalledWith(1, CANONICAL_INTAKE);

@@ -80,14 +80,13 @@ export const INTAKE_ALLOWED_PREFIXES = ["user-uploads/", "artifacts/"] as const;
 // ---------------------------------------------------------------------------
 
 /**
- * Phase 2 flag (1099). When `true`, `user-uploads/` reads are confined to
- * `user-uploads/<companyId>/`. GATED OFF until the upload-side (3d-printing /
- * DPR) migration writes per-company first — flipping early would 404 every
- * current flat `user-uploads/<file>` upload. Do NOT flip until CTO confirms the
- * upload-side migration has landed (1098). Phase 1 (`artifacts/`) scoping is
- * always on and independent of this flag.
+ * Phase 2 flag (SE-1). `user-uploads/` reads are confined to
+ * `user-uploads/<companyId>/`. ON by default since 0.1.16 (BREAKING for callers
+ * that still pass flat `user-uploads/<file>` paths — they are refused before any
+ * GitHub fetch). The `opts.enforceUserUploadsScoping` override exists for tests
+ * only. Phase 1 (`artifacts/`) scoping is always on and independent of this flag.
  */
-export const ENFORCE_USER_UPLOADS_TENANT_SCOPING = false;
+export const ENFORCE_USER_UPLOADS_TENANT_SCOPING = true;
 
 /** Companies are referenced as a single path segment; mirror the basename class. */
 const COMPANY_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -160,10 +159,9 @@ const BASENAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
  *     permalinks (pre-0.1.9 exports) are REJECTED — they cannot be attributed to
  *     a tenant, so we cannot prove the caller could have written them. (Chosen
  *     back-compat posture; see `SECURITY.md`, SE sign-off on 1099.)
- *   - `user-uploads/...` (Phase 2, gated by `ENFORCE_USER_UPLOADS_TENANT_SCOPING`):
- *     when enabled, must be under `user-uploads/<callerCompanyId>/`; otherwise
- *     the existing flat behavior is preserved until the upload-side migration
- *     lands (1098).
+ *   - `user-uploads/...` (Phase 2, `ENFORCE_USER_UPLOADS_TENANT_SCOPING`, on by
+ *     default since 0.1.16): must be under `user-uploads/<callerCompanyId>/`.
+ *     Flat `user-uploads/<file>` paths are refused.
  */
 export function assertSafeIntakePath(
   repoPath: unknown,
@@ -215,7 +213,7 @@ export function assertSafeIntakePath(
     if (enforce) {
       const tenantPrefix = `user-uploads/${callerCompanyId}/`;
       if (!normalized.startsWith(tenantPrefix)) {
-        return `repoPath under 'user-uploads/' must be within your tenant subtree '${tenantPrefix}' (cross-tenant read blocked)`;
+        return `repoPath under 'user-uploads/' must have the form 'user-uploads/<yourCompanyId>/<file>' (expected prefix '${tenantPrefix}'; flat and cross-tenant paths are blocked)`;
       }
     }
   }
