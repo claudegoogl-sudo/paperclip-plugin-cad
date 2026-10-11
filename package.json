@@ -1,9 +1,9 @@
 {
   "name": "@platform/paperclip-plugin-cad",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "type": "module",
   "private": true,
-  "description": "CadQuery plugin for Paperclip \u2014 lets agents design and render 3D CAD models via tool calls",
+  "description": "CadQuery plugin for Paperclip — lets agents design and render 3D CAD models via tool calls",
   "scripts": {
     "build": "node ./esbuild.config.mjs",
     "postbuild": "npm run check:manifest-version",

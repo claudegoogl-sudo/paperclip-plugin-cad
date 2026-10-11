@@ -67,7 +67,7 @@ describe("dist/worker.js echoes the invocation id on in-dispatch host calls", ()
 
       const res = await call(2, "executeTool", {
         toolName: "cad.run_script",
-        parameters: { script: "result = None", inputArtifacts: [{ repoPath: "user-uploads/scan.stl" }] },
+        parameters: { script: "result = None", inputArtifacts: [{ repoPath: `user-uploads/${CO}/scan.stl` }] },
         runContext: { agentId: AGENT, runId: RUN, companyId: CO },
       }, { paperclipInvocation: { id: INVOCATION_ID, scope: { companyId: CO, runId: RUN } } });
 

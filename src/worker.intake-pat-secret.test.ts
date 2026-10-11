@@ -81,7 +81,7 @@ describe("TEST-1094 intake PAT separation of duties", () => {
     mockIntake404();
 
     await handlers["cad.run_script"](
-      { script: BOX_SCRIPT, inputArtifacts: [{ repoPath: "user-uploads/scan.stl" }] },
+      { script: BOX_SCRIPT, inputArtifacts: [{ repoPath: "user-uploads/company-A/scan.stl" }] },
       DEFAULT_RUN_CTX,
     );
 
@@ -95,7 +95,7 @@ describe("TEST-1094 intake PAT separation of duties", () => {
     mockIntake404();
 
     await handlers["cad.run_script"](
-      { script: BOX_SCRIPT, inputArtifacts: [{ repoPath: "user-uploads/scan.stl" }] },
+      { script: BOX_SCRIPT, inputArtifacts: [{ repoPath: "user-uploads/company-A/scan.stl" }] },
       DEFAULT_RUN_CTX,
     );
 
