@@ -423,4 +423,19 @@ jobs:
             });
 
       - name: Run perf tests (PLA-106 §6.2 gates)
+        # Run the gates in the suite's designed CI mode: interleaved
+        # co-measurement (see CAD_WORKER_PERF_INTERLEAVE in
+        # src/sandbox.bwrap.perf.test.ts — "CI sets this"). The dev_direct
+        # baseline is sampled in the same process, alternating with the bwrap
+        # samples, so shared-runner CPU drift hits both modes equally and
+        # cancels in the percentile adders. Without it the suite has no
+        # baseline and falls back to the raw absolute p95 ceiling, which
+        # straddles the observed runner distribution (p95 2300.9 / 2350.5 ms
+        # on the two red post-merge runs vs the 2200 ms ceiling while the
+        # same head passes elsewhere) — a runner-speed lottery, not a code
+        # signal. The adder gates this enables (p95 <=140 ms, p99 <=200 ms,
+        # p50 <=165 ms, worst-per-iter <=400 ms) are strictly stronger and
+        # runner-independent; no ceiling is raised or removed.
+        env:
+          CAD_WORKER_PERF_INTERLEAVE: "1"
         run: npx vitest run --config ./vitest.config.ts src/sandbox.bwrap.perf.test.ts
